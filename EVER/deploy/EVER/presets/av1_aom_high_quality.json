@@ -1,0 +1,52 @@
+{
+  "format": {
+    "container": "mp4",
+    "clip": false,
+    "faststart": true
+  },
+  "video": {
+    "codec": "libaom-av1",
+    "preset": "none",
+    "pass": "1",
+    "crf": "28",
+    "bitrate": "0",
+    "minrate": "auto",
+    "maxrate": "auto",
+    "bufsize": "auto",
+    "gopsize": 120,
+    "pixel_format": "yuv420p",
+    "frame_rate": "auto",
+    "speed": "auto",
+    "tune": "none",
+    "profile": "none",
+    "level": "none",
+    "faststart": true,
+    "size": "auto",
+    "width": "auto",
+    "height": "auto",
+    "format": "auto",
+    "aspect": "auto",
+    "scaling": "auto",
+    "codec_options": "cpu-used=6|row-mt=1"
+  },
+  "audio": {
+    "codec": "aac",
+    "channel": "source",
+    "quality": "256k",
+    "sampleRate": "auto",
+    "volume": "100"
+  },
+  "filter": {
+    "deband": false,
+    "deshake": false,
+    "deflicker": false,
+    "dejudder": false,
+    "denoise": "none",
+    "deinterlace": "none",
+    "brightness": "0",
+    "contrast": "1",
+    "saturation": "1",
+    "gamma": "1",
+    "acontrast": "33"
+  }
+}

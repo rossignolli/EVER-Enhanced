@@ -27,7 +27,7 @@
     "format": "auto",
     "aspect": "auto",
     "scaling": "auto",
-    "codec_options": "rc=vbr:cq=19:spatial_aq=1:temporal_aq=1:aq-strength=8"
+    "codec_options": "rc=vbr|cq=19|spatial_aq=1|temporal_aq=1|aq-strength=8"
   },
   "audio": {
     "codec": "aac",

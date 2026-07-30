@@ -27,7 +27,7 @@
     "format": "auto",
     "aspect": "auto",
     "scaling": "auto",
-    "codec_options": "usage=transcoding:quality=quality:rc=cqp:qp_i=20:qp_p=22:qp_b=24"
+    "codec_options": "usage=transcoding|quality=quality|rc=cqp|qp_i=20|qp_p=22|qp_b=24"
   },
   "audio": {
     "codec": "aac",

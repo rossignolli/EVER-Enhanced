@@ -4,7 +4,9 @@
 #include "ImportExportHook.h"
 #include "X64Detour.h"
 
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <Windows.h>
 #include <d3d11.h>
 #include <dxgi1_3.h>
@@ -141,6 +143,17 @@ DEFINE_X64_HOOK(CreateExportContext, uint8_t,
 DEFINE_X64_HOOK(StartBakeProject, bool,
                 void* videoEditorInterface,  // this pointer (RCX)
                 void* montage);              // CReplayMontage* (RDX)
+
+// GTA V Enhanced 1.0.1158.13. Enhanced owns the replay montage as a
+// clip-vector-like object and accepts an optional export-name pointer.
+DEFINE_X64_HOOK(EnhancedStartBakeProject, bool,
+                void* montage,
+                const char* exportName);
+
+DEFINE_X64_HOOK(EnhancedCleanupReplayPlayback, void);
+
+DEFINE_X64_HOOK(EnhancedKillPlaybackOrBake, void,
+                bool userCancelled);
 
 // CVideoEditorInterface::HasVideoRenderErrored
 DEFINE_X64_HOOK(HasVideoRenderErrored, bool);

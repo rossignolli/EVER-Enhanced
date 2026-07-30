@@ -1,7 +1,9 @@
 #pragma once
 
 #ifndef NOMINMAX
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #endif
 #include <Windows.h>
 #include <fstream>

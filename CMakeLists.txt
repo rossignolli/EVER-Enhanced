@@ -14,6 +14,8 @@ set(CMAKE_CXX_STANDARD 20)
 
 project(EVER C CXX)
 
+include(CTest)
+
 ################################################################################
 # Set target arch type if empty. Visual studio solution generator provides it.
 ################################################################################
@@ -110,4 +112,8 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 ################################################################################
 add_subdirectory(EVER)
 add_subdirectory(EVER-config)
+
+# EVER's packaging step refreshes the deploy directory. Build the configurator
+# afterwards so its executable cannot be removed by that refresh.
+add_dependencies(EVER-config EVER)
 

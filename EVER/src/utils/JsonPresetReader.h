@@ -31,34 +31,36 @@ public:
             
             if (j.contains("format")) {
                 auto& fmt = j["format"];
-                copyJsonString(fmt.value("container", "mp4"), config.format.container, sizeof(config.format.container));
+                std::string container = fmt.value("container", "mp4");
+                if (container == "mkv") container = "matroska";
+                copyJsonString(container, config.format.container, sizeof(config.format.container));
                 config.format.faststart = fmt.value("faststart", false);
             }
             
             if (j.contains("video")) {
                 auto& vid = j["video"];
-                copyJsonString(vid.value("codec", "libx264"), config.video.encoder, sizeof(config.video.encoder));
-                
-                std::string videoOptions = buildVideoOptionsString(vid);
-                copyJsonString(videoOptions, config.video.options, sizeof(config.video.options));
-                
-                std::string videoFilters = buildVideoFiltersString(j);
-                copyJsonString(videoFilters, config.video.filters, sizeof(config.video.filters));
-                
-                copyJsonString(std::string(""), config.video.sidedata, sizeof(config.video.sidedata));
+                const bool directSchema = vid.contains("encoder") || vid.contains("options");
+                copyJsonString(directSchema ? vid.value("encoder", "libx264") : vid.value("codec", "libx264"),
+                    config.video.encoder, sizeof(config.video.encoder));
+                copyJsonString(directSchema ? vid.value("options", "") : buildVideoOptionsString(vid),
+                    config.video.options, sizeof(config.video.options));
+                copyJsonString(directSchema ? vid.value("filters", "") : buildVideoFiltersString(j),
+                    config.video.filters, sizeof(config.video.filters));
+                copyJsonString(directSchema ? vid.value("sidedata", "") : std::string(""),
+                    config.video.sidedata, sizeof(config.video.sidedata));
             }
             
             if (j.contains("audio")) {
                 auto& aud = j["audio"];
-                copyJsonString(aud.value("codec", "aac"), config.audio.encoder, sizeof(config.audio.encoder));
-                
-                std::string audioOptions = buildAudioOptionsString(aud);
-                copyJsonString(audioOptions, config.audio.options, sizeof(config.audio.options));
-                
-                std::string audioFilters = buildAudioFiltersString(j);
-                copyJsonString(audioFilters, config.audio.filters, sizeof(config.audio.filters));
-                
-                copyJsonString(std::string(""), config.audio.sidedata, sizeof(config.audio.sidedata));
+                const bool directSchema = aud.contains("encoder") || aud.contains("options");
+                copyJsonString(directSchema ? aud.value("encoder", "aac") : aud.value("codec", "aac"),
+                    config.audio.encoder, sizeof(config.audio.encoder));
+                copyJsonString(directSchema ? aud.value("options", "") : buildAudioOptionsString(aud),
+                    config.audio.options, sizeof(config.audio.options));
+                copyJsonString(directSchema ? aud.value("filters", "") : buildAudioFiltersString(j),
+                    config.audio.filters, sizeof(config.audio.filters));
+                copyJsonString(directSchema ? aud.value("sidedata", "") : std::string(""),
+                    config.audio.sidedata, sizeof(config.audio.sidedata));
             }
             
             LOG(LL_NFO, "Successfully loaded encoder configuration from: ", preset_path_);

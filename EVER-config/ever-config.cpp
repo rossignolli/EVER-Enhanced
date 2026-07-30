@@ -68,20 +68,40 @@ namespace {
                PresetConfig c; c.format.container = "mp4"; c.format.faststart = true;
                c.video.encoder = "hevc_nvenc"; c.video.pixFmt = "p010le"; c.video.options = "preset=p5|rc=vbr|cq=22|profile=main10";
                c.audio.encoder = "aac"; c.audio.options = "_sampleFormat=fltp|b=256000"; return c; }()},
+           {"NVENC AV1 (quality)", [] {
+               PresetConfig c; c.format.container = "mp4"; c.format.faststart = true;
+               c.video.encoder = "av1_nvenc"; c.video.pixFmt = "yuv420p"; c.video.options = "preset=p6|tune=hq|rc=vbr|cq=24|g=120|surfaces=4|spatial-aq=1|temporal-aq=1|aq-strength=8";
+               c.audio.encoder = "aac"; c.audio.options = "_sampleFormat=fltp|b=256000"; return c; }()},
+           {"AV1 libaom (CPU)", [] {
+               PresetConfig c; c.format.container = "mp4"; c.format.faststart = true;
+               c.video.encoder = "libaom-av1"; c.video.pixFmt = "yuv420p"; c.video.options = "cpu-used=6|crf=28|b=0|row-mt=1";
+               c.audio.encoder = "aac"; c.audio.options = "_sampleFormat=fltp|b=256000"; return c; }()},
            {"H.265 x265 (quality)", [] {
                PresetConfig c; c.format.container = "mp4"; c.format.faststart = true;
                c.video.encoder = "libx265"; c.video.pixFmt = "yuv420p10le"; c.video.options = "preset=slow|crf=20|profile=main10";
                c.audio.encoder = "aac"; c.audio.options = "_sampleFormat=fltp|b=256000"; return c; }()},
+           {"MKV H.264 + FLAC", [] {
+               PresetConfig c; c.format.container = "mkv"; c.format.faststart = false;
+               c.video.encoder = "h264_nvenc"; c.video.pixFmt = "yuv420p"; c.video.options = "preset=p6|rc=vbr|cq=19|spatial_aq=1|temporal_aq=1|aq-strength=8";
+               c.audio.encoder = "flac"; c.audio.options = "ar=48000"; return c; }()},
+           {"AVI MPEG-4 + MP3", [] {
+               PresetConfig c; c.format.container = "avi"; c.format.faststart = false;
+               c.video.encoder = "mpeg4"; c.video.pixFmt = "yuv420p"; c.video.options = "b=80M|g=120";
+               c.audio.encoder = "libmp3lame"; c.audio.options = "b=320k|ar=48000"; return c; }()},
+           {"MOV ProRes 422 HQ + PCM", [] {
+               PresetConfig c; c.format.container = "mov"; c.format.faststart = false;
+               c.video.encoder = "prores_ks"; c.video.pixFmt = "yuv422p10le"; c.video.options = "profile=3|g=1";
+               c.audio.encoder = "pcm_s16le"; c.audio.options = "_sampleFormat=s16|ar=48000"; return c; }()},
            {"Copy streams", [] {
                PresetConfig c; c.format.container = "mkv"; c.format.faststart = false;
                c.video.encoder = "copy"; c.video.pixFmt = ""; c.video.options = "";
                c.audio.encoder = "copy"; c.audio.options = ""; return c; }()},
         };
 
-        const std::vector<const char*> kContainers = {"mp4", "mkv", "mov", "flv"};
-        const std::vector<const char*> kVideoEncoders = {"libx264", "h264_nvenc", "hevc_nvenc", "libx265", "libvpx-vp9", "copy"};
-        const std::vector<const char*> kAudioEncoders = {"aac", "libopus", "ac3", "mp3", "copy"};
-        const std::vector<const char*> kPixelFormats = {"yuv420p", "yuv420p10le", "nv12", "p010le"};
+        const std::vector<const char*> kContainers = {"mp4", "mkv", "avi", "mov", "webm"};
+        const std::vector<const char*> kVideoEncoders = {"libx264", "h264_nvenc", "hevc_nvenc", "av1_nvenc", "libx265", "libaom-av1", "av1_amf", "mpeg4", "prores_ks", "libvpx-vp9", "copy"};
+        const std::vector<const char*> kAudioEncoders = {"aac", "libmp3lame", "flac", "pcm_s16le", "libopus", "ac3", "copy"};
+        const std::vector<const char*> kPixelFormats = {"yuv420p", "yuv420p10le", "yuv422p10le", "nv12", "p010le"};
 
     std::string GetWindowTextString(HWND hwnd) {
         int len = GetWindowTextLengthA(hwnd);
@@ -149,18 +169,68 @@ namespace {
             cfg.format.container = fmt.value("container", cfg.format.container);
             cfg.format.faststart = fmt.value("faststart", cfg.format.faststart);
 
+            const auto scalarString = [](const nlohmann::json& value) -> std::string {
+                if (value.is_string()) return value.get<std::string>();
+                if (value.is_number_integer()) return std::to_string(value.get<long long>());
+                if (value.is_number_float()) return std::to_string(value.get<double>());
+                return {};
+            };
+            const auto appendOption = [](std::string& options, const std::string& option) {
+                if (option.empty()) return;
+                if (!options.empty()) options.push_back('|');
+                options += option;
+            };
+
             auto vid = j.value("video", nlohmann::json::object());
-            cfg.video.encoder = vid.value("encoder", cfg.video.encoder);
-            cfg.video.options = vid.value("options", cfg.video.options);
-            cfg.video.options = ExtractOption(cfg.video.options, "_pixelFormat", cfg.video.pixFmt);
-            cfg.video.filters = vid.value("filters", cfg.video.filters);
-            cfg.video.sidedata = vid.value("sidedata", cfg.video.sidedata);
+            cfg.video.encoder = vid.value("encoder", vid.value("codec", cfg.video.encoder));
+            if (vid.contains("options")) {
+                cfg.video.options = vid.value("options", cfg.video.options);
+                cfg.video.options = ExtractOption(cfg.video.options, "_pixelFormat", cfg.video.pixFmt);
+                cfg.video.filters = vid.value("filters", cfg.video.filters);
+                cfg.video.sidedata = vid.value("sidedata", cfg.video.sidedata);
+            } else {
+                cfg.video.options.clear();
+                cfg.video.pixFmt = vid.value("pixel_format", cfg.video.pixFmt);
+                const std::pair<const char*, const char*> mappedVideoOptions[] = {
+                    {"preset", "preset"}, {"crf", "crf"}, {"bitrate", "b"},
+                    {"minrate", "minrate"}, {"maxrate", "maxrate"}, {"bufsize", "bufsize"},
+                    {"gopsize", "g"}, {"tune", "tune"}, {"profile", "profile"},
+                    {"level", "level"}, {"frame_rate", "r"}
+                };
+                for (const auto& [jsonKey, optionKey] : mappedVideoOptions) {
+                    if (!vid.contains(jsonKey)) continue;
+                    const std::string value = scalarString(vid[jsonKey]);
+                    if (value.empty() || value == "auto" || value == "none") continue;
+                    appendOption(cfg.video.options, std::string(optionKey) + "=" + value);
+                }
+                if (vid.contains("codec_options")) {
+                    appendOption(cfg.video.options, vid.value("codec_options", ""));
+                }
+            }
 
             auto aud = j.value("audio", nlohmann::json::object());
-            cfg.audio.encoder = aud.value("encoder", cfg.audio.encoder);
-            cfg.audio.options = aud.value("options", cfg.audio.options);
-            cfg.audio.filters = aud.value("filters", cfg.audio.filters);
-            cfg.audio.sidedata = aud.value("sidedata", cfg.audio.sidedata);
+            cfg.audio.encoder = aud.value("encoder", aud.value("codec", cfg.audio.encoder));
+            if (aud.contains("options")) {
+                cfg.audio.options = aud.value("options", cfg.audio.options);
+                cfg.audio.filters = aud.value("filters", cfg.audio.filters);
+                cfg.audio.sidedata = aud.value("sidedata", cfg.audio.sidedata);
+            } else {
+                cfg.audio.options.clear();
+                if (aud.contains("quality")) {
+                    const std::string value = scalarString(aud["quality"]);
+                    if (!value.empty() && value != "auto") appendOption(cfg.audio.options, "b=" + value);
+                }
+                if (aud.contains("sampleRate")) {
+                    const std::string value = scalarString(aud["sampleRate"]);
+                    if (!value.empty() && value != "auto") appendOption(cfg.audio.options, "ar=" + value);
+                }
+                if (cfg.audio.encoder == "aac") {
+                    appendOption(cfg.audio.options, "profile=aac_low");
+                    appendOption(cfg.audio.options, "_sampleFormat=fltp");
+                } else if (cfg.audio.encoder == "pcm_s16le") {
+                    appendOption(cfg.audio.options, "_sampleFormat=s16");
+                }
+            }
         } catch (...) {
             // Keep defaults if parsing fails
         }

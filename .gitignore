@@ -52,6 +52,13 @@ packages/
 /vcpkg_installed
 /reshade
 /build
+/build-enhanced
+/artifacts
+/.toolchain
+/tools
+/staging
+/EVER-Enhanced-*.zip
+/EVER-Enhanced-*.zip.sha256
 /Builds
 
 !ScriptHookV/lib/*.lib

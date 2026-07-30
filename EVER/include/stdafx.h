@@ -1,6 +1,8 @@
 #pragma once
 
+#ifndef NOMINMAX
 #define NOMINMAX  // Prevent Windows.h min/max macros from interfering with std::numeric_limits
+#endif
 
 //#pragma comment(lib, "../ScriptHookV/lib/ScriptHookV.lib")
 #pragma comment(lib, "mfuuid.lib")

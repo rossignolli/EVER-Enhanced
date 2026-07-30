@@ -1,0 +1,52 @@
+{
+  "format": {
+    "container": "avi",
+    "clip": false,
+    "faststart": false
+  },
+  "video": {
+    "codec": "mpeg4",
+    "preset": "none",
+    "pass": "1",
+    "crf": "none",
+    "bitrate": "80M",
+    "minrate": "auto",
+    "maxrate": "auto",
+    "bufsize": "auto",
+    "gopsize": 120,
+    "pixel_format": "yuv420p",
+    "frame_rate": "auto",
+    "speed": "auto",
+    "tune": "none",
+    "profile": "none",
+    "level": "none",
+    "faststart": false,
+    "size": "auto",
+    "width": "auto",
+    "height": "auto",
+    "format": "auto",
+    "aspect": "auto",
+    "scaling": "auto",
+    "codec_options": ""
+  },
+  "audio": {
+    "codec": "libmp3lame",
+    "channel": "source",
+    "quality": "320k",
+    "sampleRate": "48000",
+    "volume": "100"
+  },
+  "filter": {
+    "deband": false,
+    "deshake": false,
+    "deflicker": false,
+    "dejudder": false,
+    "denoise": "none",
+    "deinterlace": "none",
+    "brightness": "0",
+    "contrast": "1",
+    "saturation": "1",
+    "gamma": "1",
+    "acontrast": "33"
+  }
+}

@@ -1,0 +1,19 @@
+EVER Enhanced
+Copyright 2026 EVER Enhanced contributors
+
+This product is a modified derivative of EVER (Extended Video Export Revived):
+https://github.com/MiffedLyric559/EVER
+
+EVER is itself derived from EVE (Extended Video Export), originally created by
+Ali Alidoust:
+https://github.com/ali-alidoust/gta5-extended-video-export
+
+The original work and source modifications are distributed under the Apache
+License, Version 2.0. The GTA V Enhanced port changes include edition-specific
+runtime validation and hooks, DirectX 12/ReShade capture, GPU motion-blur
+accumulation, high/custom frame-rate audio synchronization, OpenEXR color/depth
+export, FFmpeg container and codec support, presets, tests, and documentation.
+
+Third-party libraries included in binary release archives retain their own
+licenses. Their license texts are included in THIRD_PARTY_LICENSES in each
+release archive.

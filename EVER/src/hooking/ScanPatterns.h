@@ -10,6 +10,13 @@ namespace ever {
             const std::string getRenderTimeBase = 
                 "48 83 EC 28 48 8B 01 FF 50 ?? 8B C8 48 83 C4 28 E9 ?? ?? ?? ??";
 
+            // GTA V Enhanced 1.0.1158.13. The wrapper is structurally identical to Legacy,
+            // but its virtual dispatch slot moved from +0x10 to +0x18 and the subsequent
+            // mov ecx,eax uses the equivalent 89 C1 encoding. Keep this exact so Enhanced
+            // never hooks an unrelated short virtual-call wrapper.
+            const std::string getRenderTimeBaseEnhanced =
+                "48 83 EC 28 48 8B 01 FF 50 18 89 C1 48 83 C4 28 E9 ?? ?? ?? ??";
+
             const std::string getGameSpeedMultiplier = 
                 "8B 91 90 00 00 00 85 D2 74 65 FF CA 74 58 FF CA 74 4B FF CA 74 3E 83 EA 02 74 30 FF CA 74 23 FF CA 74 16 FF CA 74 09";
 
@@ -41,6 +48,21 @@ namespace ever {
             // Dual-pass audio rendering functions
             const std::string startBakeProject = 
                 "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 30 40 32 FF 48 83 3D ?? ?? ?? ?? 00 48 8B DA 48 8B F1";
+
+            // GTA V Enhanced 1.0.1158.13 dual-pass state-machine entry points.
+            // These patterns deliberately include the changed calling convention and
+            // state checks so an unrelated replay helper cannot be hooked silently.
+            const std::string startBakeProjectEnhanced =
+                "41 57 41 56 41 54 56 57 53 48 83 EC 38 49 89 D7 49 89 CC 31 DB 48 83 3D ?? ?? ?? ?? 00";
+
+            const std::string cleanupReplayPlaybackEnhanced =
+                "56 48 83 EC 20 80 3D ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? 0F B6 05 ?? ?? ?? ?? 24 01";
+
+            const std::string isPendingBakeStartEnhanced =
+                "83 3D ?? ?? ?? ?? 04 0F 94 C0 C3";
+
+            const std::string killPlaybackOrBakeEnhanced =
+                "56 53 48 83 EC 28 89 CB 48 8D 0D ?? ?? ?? ?? 31 D2 41 B0 01 E8 ?? ?? ?? ?? 8B 05 ?? ?? ?? ?? 83 E0 FC 83 F8 04";
                 
             // CVideoEditorUi::TriggerExport - Not needed anymore
             //const std::string triggerExport = "83 CA FF 8D 4A 02 E8 ?? ?? ?? ?? C6 05 ?? ?? ?? ?? 01 EB ?? 48 83 64 24 28 00 48 83 64 24 20 00 45 33 C9 45 8D 41 02 48 8D 15 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ??";

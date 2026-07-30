@@ -110,6 +110,7 @@ namespace Encoder {
         
         std::string filename = utf8_encode(outputFilename_);
         std::string formatName = config_.format.container;
+        if (formatName == "mkv") formatName = "matroska";
         
         LOG(LL_DBG, "FFmpegEncoder::Open - Allocating output context for format: ", formatName);
         
@@ -320,6 +321,10 @@ namespace Encoder {
         }
         
         videoStream_->time_base = videoCodecContext_->time_base;
+        videoStream_->avg_frame_rate = videoCodecContext_->framerate;
+        videoStream_->r_frame_rate = videoCodecContext_->framerate;
+        LOG(LL_DBG, "FFmpegEncoder::InitializeVideoEncoder - Stream frame-rate metadata: ",
+            videoStream_->avg_frame_rate.num, "/", videoStream_->avg_frame_rate.den);
         
         LOG(LL_DBG, "FFmpegEncoder::InitializeVideoEncoder - Allocating video frame");
         videoFrame_ = av_frame_alloc();
@@ -417,6 +422,41 @@ namespace Encoder {
             LOG(LL_ERR, "FFmpegEncoder::InitializeAudioEncoder - Failed to parse encoder options");
             POST();
             return hr;
+        }
+
+        // Several lossless and legacy encoders (notably FLAC and libmp3lame) reject an
+        // AVCodecContext whose sample format is left at AV_SAMPLE_FMT_NONE. AAC and PCM
+        // presets specify one explicitly, but custom presets should not have to know the
+        // encoder's internal list. Prefer a direct 16-bit path when it is supported, then
+        // fall back to the first format advertised by the encoder.
+        if (codec->sample_fmts) {
+            const auto supportsSampleFormat = [codec](AVSampleFormat candidate) {
+                for (const AVSampleFormat* supported = codec->sample_fmts;
+                     *supported != AV_SAMPLE_FMT_NONE; ++supported) {
+                    if (*supported == candidate) return true;
+                }
+                return false;
+            };
+
+            if (audioCodecContext_->sample_fmt == AV_SAMPLE_FMT_NONE ||
+                !supportsSampleFormat(audioCodecContext_->sample_fmt)) {
+                const AVSampleFormat requested = audioCodecContext_->sample_fmt;
+                audioCodecContext_->sample_fmt = supportsSampleFormat(AV_SAMPLE_FMT_S16)
+                    ? AV_SAMPLE_FMT_S16
+                    : codec->sample_fmts[0];
+                LOG(LL_NFO,
+                    "FFmpegEncoder::InitializeAudioEncoder - Negotiated sample format: ",
+                    av_get_sample_fmt_name(audioCodecContext_->sample_fmt),
+                    " (requested=", requested == AV_SAMPLE_FMT_NONE
+                        ? "none"
+                        : av_get_sample_fmt_name(requested), ")");
+            }
+        }
+
+        if (audioCodecContext_->sample_fmt == AV_SAMPLE_FMT_NONE) {
+            LOG(LL_ERR, "FFmpegEncoder::InitializeAudioEncoder - Encoder exposes no usable sample format");
+            POST();
+            return E_FAIL;
         }
         
         if (formatContext_->oformat->flags & AVFMT_GLOBALHEADER) {

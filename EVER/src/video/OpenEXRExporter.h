@@ -18,6 +18,10 @@ namespace Encoder {
                         const Microsoft::WRL::ComPtr<ID3D11Texture2D>& depthTexture,
                         uint64_t frameNumber);
 
+        HRESULT exportFrame(const uint8_t* rgbaData, uint32_t colorRowPitch,
+                        const float* depthData, uint32_t depthRowPitch,
+                        uint64_t frameNumber);
+
         const std::string& getOutputPath() const { return outputPath_; }
 
         int32_t getWidth() const { return width_; }

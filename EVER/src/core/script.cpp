@@ -9,9 +9,12 @@
 #include "util.h"
 #include "PatternScanner.h"
 #include <mferror.h>
+#include <ppl.h>
+#include <reshade.hpp>
 
 #include "ScanPatterns.h"
 #include <DirectXTex.h>
+#include <d3d12.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -22,14 +25,20 @@
 #include <cwctype>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 #include <variant>
+
+void AutoReloadConfig();
+void CreateNewExportContext();
 
 namespace PSAccumulate {
 #include <PSAccumulate.h>
@@ -41,6 +50,18 @@ namespace PSDivide {
 
 namespace VSFullScreen {
 #include <VSFullScreen.h>
+}
+
+namespace PSAccumulateEnhanced {
+#include <PSAccumulateEnhanced.h>
+}
+
+namespace PSDivideEnhanced {
+#include <PSDivideEnhanced.h>
+}
+
+namespace VSFullScreenEnhanced {
+#include <VSFullScreenEnhanced.h>
 }
 
 using namespace Microsoft::WRL;
@@ -59,6 +80,7 @@ namespace {
     ComPtr<ID3D11Texture2D> pStencilTexture;
     void* pCtxLinearizeBuffer = nullptr;
     bool isCustomFrameRateSupported = false;
+    bool isEnhancedDualPassSupported = false;
     std::unique_ptr<Encoder::EncoderSession> encodingSession;
     std::mutex mxSession;
     std::mutex mxOnPresent;
@@ -87,6 +109,127 @@ namespace {
     std::atomic_bool hasLoggedD3D11HookFailure = false;
     std::atomic_bool hasLoggedMissingFactory2 = false;
     std::chrono::steady_clock::time_point lastD3D11HookAttempt;
+    std::mutex reshadeCaptureMutex;
+    std::vector<uint8_t> reshadeCapturePixels;
+    std::atomic_bool hasLoggedEnhancedCaptureResolutionMismatch = false;
+    std::atomic_bool hasLoggedEnhancedCaptureSuccess = false;
+    std::atomic_bool hasLoggedEnhancedNamedCaptureFailure = false;
+    std::atomic_uint32_t enhancedPendingVideoFrames = 0;
+    std::atomic_uint32_t enhancedExpectedWidth = 0;
+    std::atomic_uint32_t enhancedExpectedHeight = 0;
+    std::atomic_uint32_t enhancedRuntimeWidth = 0;
+    std::atomic_uint32_t enhancedRuntimeHeight = 0;
+    std::atomic<reshade::api::effect_runtime*> enhancedRuntimeSource = nullptr;
+    std::atomic_bool enhancedVideoResourceTracked = false;
+    std::mutex enhancedResourceMutex;
+    reshade::api::resource enhancedVideoEncodeResource{};
+    reshade::api::resource_usage enhancedVideoEncodeState = reshade::api::resource_usage::undefined;
+    reshade::api::device* enhancedCleanCandidateDevice = nullptr;
+    reshade::api::resource enhancedCleanCandidateResource{};
+    reshade::api::resource_usage enhancedCleanCandidateState = reshade::api::resource_usage::undefined;
+    reshade::api::device* enhancedDepthCandidateDevice = nullptr;
+    reshade::api::resource enhancedDepthCandidateResource{};
+    reshade::api::resource_usage enhancedDepthCandidateState = reshade::api::resource_usage::undefined;
+
+    constexpr size_t kEnhancedReadbackSlotCount = 3;
+    struct EnhancedReadbackSlot {
+        reshade::api::resource resource{};
+        reshade::api::resource depthResource{};
+        reshade::api::fence fence{};
+        uint64_t fenceValue = 0;
+        uint64_t generation = 0;
+        bool gpuMotionBlurOutput = false;
+        bool pending = false;
+    };
+    std::array<EnhancedReadbackSlot, kEnhancedReadbackSlotCount> enhancedReadbackSlots{};
+    std::deque<size_t> enhancedReadbackOrder;
+    size_t enhancedReadbackCursor = 0;
+    reshade::api::effect_runtime* enhancedReadbackRuntime = nullptr;
+    reshade::api::device* enhancedReadbackDevice = nullptr;
+    uint32_t enhancedReadbackWidth = 0;
+    uint32_t enhancedReadbackHeight = 0;
+    reshade::api::format enhancedReadbackFormat = reshade::api::format::unknown;
+    reshade::api::format enhancedReadbackDepthSourceFormat = reshade::api::format::unknown;
+    reshade::api::format enhancedReadbackDepthFormat = reshade::api::format::unknown;
+    bool enhancedReadbackHasDepth = false;
+    std::atomic_uint64_t enhancedCaptureGeneration = 1;
+    std::mutex enhancedReadbackMutex;
+    std::mutex enhancedDiagnosticMutex;
+    std::unordered_set<uint64_t> enhancedBackBufferHandles;
+    std::unordered_set<uint64_t> enhancedLoggedRenderTargetHandles;
+    std::unordered_set<uint64_t> enhancedLoggedDepthStencilHandles;
+    std::unordered_set<uint64_t> enhancedLoggedCopySourceHandles;
+    std::atomic_bool hasLoggedEnhancedBackBuffer = false;
+    std::atomic_bool hasLoggedEnhancedCleanCapture = false;
+    std::atomic_bool enhancedPostEffectsCaptureReady = false;
+    std::atomic_uint64_t enhancedPostEffectsBackBufferHandle = 0;
+    std::atomic_bool hasLoggedEnhancedPreEffectsReplacement = false;
+    std::atomic_bool hasLoggedEnhancedMissingDepth = false;
+    std::atomic_bool enhancedOpenExrPayloadValidated = false;
+    std::vector<float> enhancedCaptureDepth;
+
+    struct EnhancedMotionBlurState {
+        std::vector<uint16_t> accumulation;
+        std::vector<uint8_t> output;
+        uint32_t rowPitch = 0;
+        uint32_t height = 0;
+        uint32_t subframeIndex = 0;
+        uint32_t accumulatedSamples = 0;
+        uint8_t configuredSamples = 0;
+        float configuredStrength = 0.0f;
+        uint64_t consumedSubframes = 0;
+        uint64_t emittedFrames = 0;
+    };
+    EnhancedMotionBlurState enhancedMotionBlur;
+
+    struct EnhancedGpuMotionBlurState {
+        reshade::api::effect_runtime* runtime = nullptr;
+        reshade::api::device* device = nullptr;
+        reshade::api::resource sourceCopy{};
+        reshade::api::resource accumulation{};
+        reshade::api::resource finalOutput{};
+        reshade::api::resource_view sourceSrv{};
+        reshade::api::resource_view accumulationSrv{};
+        reshade::api::resource_view accumulationRtv{};
+        reshade::api::resource_view finalRtv{};
+        reshade::api::pipeline_layout pipelineLayout{};
+        reshade::api::pipeline accumulatePipeline{};
+        reshade::api::pipeline dividePipeline{};
+        uint32_t width = 0;
+        uint32_t height = 0;
+        reshade::api::format sourceFormat = reshade::api::format::unknown;
+        uint32_t subframeIndex = 0;
+        uint32_t accumulatedSamples = 0;
+        uint8_t configuredSamples = 0;
+        float configuredStrength = 0.0f;
+        uint64_t consumedSubframes = 0;
+        uint64_t emittedFrames = 0;
+        bool creationFailed = false;
+    };
+    EnhancedGpuMotionBlurState enhancedGpuMotionBlur;
+
+    std::string outputExtensionForContainer(const char* container) {
+        const std::string format = (container && *container) ? container : "mp4";
+        if (format == "matroska" || format == "mkv") {
+            return ".mkv";
+        }
+        return "." + format;
+    }
+
+    template <typename Function>
+    void parallelForMotionBlurBytes(const size_t byteCount, Function&& function) {
+        constexpr size_t kChunkBytes = 1u << 20;
+        const size_t chunkCount = (byteCount + kChunkBytes - 1) / kChunkBytes;
+        if (chunkCount <= 1) {
+            function(0, byteCount);
+            return;
+        }
+        Concurrency::parallel_for<size_t>(0, chunkCount, [&](const size_t chunkIndex) {
+            const size_t begin = chunkIndex * kChunkBytes;
+            const size_t end = std::min(begin + kChunkBytes, byteCount);
+            function(begin, end);
+        });
+    }
 
     constexpr std::chrono::milliseconds kD3D11HookRetryDelay(100);
     constexpr std::chrono::milliseconds kSwapChainReadyTimeout(5000);
@@ -135,6 +278,22 @@ namespace {
         return isFiveM;
     }
 
+    bool DetectEnhancedEdition() {
+        std::array<wchar_t, 32768> path{};
+        const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+        if (length == 0 || length >= path.size()) {
+            return false;
+        }
+
+        const std::wstring fullPath(path.data(), length);
+        const size_t separator = fullPath.find_last_of(L"\\/");
+        const std::wstring fileName =
+            separator == std::wstring::npos ? fullPath : fullPath.substr(separator + 1);
+        return _wcsicmp(fileName.c_str(), L"GTA5_Enhanced.exe") == 0;
+    }
+
+    const bool g_isEnhancedEdition = DetectEnhancedEdition();
+
     class ScopedFlagGuard {
     public:
         explicit ScopedFlagGuard(bool& flag) : ref(flag) { ref = true; }
@@ -167,6 +326,8 @@ namespace {
         ComPtr<ID3D11Device> p_device;
         ComPtr<IDXGISwapChain> p_swap_chain;
         ComPtr<IMFMediaType> video_media_type;
+        DWORD video_stream_index = 0;
+        DWORD audio_stream_index = 1;
         int acc_count = 0;
         int total_frame_num = 0;
     };
@@ -187,6 +348,8 @@ namespace {
         DualPassState state = DualPassState::IDLE;
         void* saved_video_editor_interface = nullptr;
         void* saved_montage_ptr = nullptr;
+        std::string enhanced_export_name;
+        bool enhanced_export_name_present = false;
         
         std::pair<int32_t, int32_t> original_fps;
         int32_t original_motion_blur_samples = 0;
@@ -238,6 +401,86 @@ namespace {
         asyncFinalizeFailed = false;
     }
 
+    bool startAsyncEncoderFinalization(std::unique_ptr<Encoder::EncoderSession> session,
+                                       const std::string& stagePrefix) {
+        if (!session) {
+            LOG(LL_ERR, "Cannot start async FFmpeg finalization without an encoding session");
+            asyncFinalizeFailed = true;
+            asyncFinalizeCompleted = true;
+            asyncFinalizeInProgress = false;
+            markFfmpegExportFailure((stagePrefix + "::missing-session").c_str(), E_POINTER);
+            return false;
+        }
+
+        asyncFinalizeInProgress = true;
+        asyncFinalizeCompleted = false;
+        asyncFinalizeFailed = false;
+
+        try {
+            std::thread([session = std::move(session), stagePrefix]() mutable {
+                bool workerSuccess = true;
+                try {
+                    LOG(LL_NFO, "Async FFmpeg finalization thread started. context=", stagePrefix);
+
+                    const HRESULT finishAudioHr = session->finishAudio();
+                    if (FAILED(finishAudioHr)) {
+                        workerSuccess = false;
+                        markFfmpegExportFailure((stagePrefix + "::finishAudio").c_str(), finishAudioHr);
+                    }
+
+                    const HRESULT finishVideoHr = session->finishVideo();
+                    if (FAILED(finishVideoHr)) {
+                        workerSuccess = false;
+                        markFfmpegExportFailure((stagePrefix + "::finishVideo").c_str(), finishVideoHr);
+                    }
+
+                    const HRESULT endSessionHr = session->endSession();
+                    if (FAILED(endSessionHr)) {
+                        workerSuccess = false;
+                        markFfmpegExportFailure((stagePrefix + "::endSession").c_str(), endSessionHr);
+                    }
+                } catch (const std::exception& ex) {
+                    workerSuccess = false;
+                    LOG(LL_ERR, "Async FFmpeg finalization exception: ", ex.what());
+                    markFfmpegExportFailure((stagePrefix + "::exception").c_str(), E_FAIL);
+                } catch (...) {
+                    workerSuccess = false;
+                    LOG(LL_ERR, "Async FFmpeg finalization unknown exception");
+                    markFfmpegExportFailure((stagePrefix + "::unknown").c_str(), E_FAIL);
+                }
+
+                session.reset();
+
+                asyncFinalizeFailed = !workerSuccess;
+                asyncFinalizeCompleted = true;
+                asyncFinalizeInProgress = false;
+
+                if (workerSuccess) {
+                    clearFfmpegExportFailure();
+                    LOG(LL_NFO, "Async FFmpeg finalization completed successfully. context=", stagePrefix);
+                } else {
+                    LOG(LL_ERR, "Async FFmpeg finalization failed. stage=", getFfmpegExportFailureStage());
+                }
+            }).detach();
+        } catch (const std::exception& ex) {
+            LOG(LL_ERR, "Failed to start async FFmpeg finalization thread: ", ex.what());
+            asyncFinalizeFailed = true;
+            asyncFinalizeCompleted = true;
+            asyncFinalizeInProgress = false;
+            markFfmpegExportFailure((stagePrefix + "::thread-start").c_str(), E_FAIL);
+            return false;
+        } catch (...) {
+            LOG(LL_ERR, "Failed to start async FFmpeg finalization thread (unknown exception)");
+            asyncFinalizeFailed = true;
+            asyncFinalizeCompleted = true;
+            asyncFinalizeInProgress = false;
+            markFfmpegExportFailure((stagePrefix + "::thread-start-unknown").c_str(), E_FAIL);
+            return false;
+        }
+
+        return true;
+    }
+
     // Manual hooks for functions that can't use PolyHook
     using CleanupReplayPlaybackInternalFunc = void(*)();
     CleanupReplayPlaybackInternalFunc pCleanupReplayPlaybackOriginal = nullptr;
@@ -248,6 +491,11 @@ namespace {
     using KillPlaybackOrBakeFunc = void(*)(void* thisPtr, bool userCancelled);
     KillPlaybackOrBakeFunc pKillPlaybackOrBakeOriginal = nullptr;
     uint8_t g_killPlaybackOrBakeOriginalBytes[12] = {0};
+    using EnhancedKillPlaybackOrBakeFunc = void(*)(bool userCancelled);
+    EnhancedKillPlaybackOrBakeFunc pEnhancedKillPlaybackOrBakeOriginal = nullptr;
+    uint8_t g_enhancedKillPlaybackOrBakeOriginalBytes[12] = {0};
+    uint64_t g_enhancedKillPass1ExitPatchAddress = 0;
+    void* g_enhancedKillPass1ExitStub = nullptr;
 
     // SetUserConfirmationScreen hook (manual hook with unhook/rehook pattern)
     using SetUserConfirmationScreenFunc = void(*)(const char* pTextLabel,
@@ -264,6 +512,8 @@ namespace {
     std::atomic_int g_pass2StartupDelayFrames = 0;
     constexpr int kPass2StartupDelayFrames = 60;
     uint8_t* g_wantDelayedClosePtr = nullptr;
+    thread_local bool g_enhancedDualPassCleanupInProgress = false;
+    thread_local bool g_enhancedIsPendingHandoffInProgress = false;
     
     // Store IsPendingBakeStart address for hook to access
     uint64_t g_isPendingBakeStartAddress = 0;
@@ -271,6 +521,10 @@ namespace {
 
     void schedulePass2StartupOnMainThread(const char* reason);
     bool executePass2StartupOnMainThread();
+    bool callEnhancedCleanupReplayPlaybackOriginal();
+    bool callEnhancedKillPlaybackOrBakeOriginal(bool userCancelled);
+    bool prepareEnhancedKillPass1ExitPatch(uint64_t functionAddress);
+    bool callEnhancedKillPlaybackOrBakeThroughFinalize();
 
     struct TemporalSyncState {
         double ripplesAccumulatorSec = 0.0;
@@ -796,6 +1050,195 @@ namespace {
         return true;
     }
 
+    bool callEnhancedCleanupReplayPlaybackOriginal() {
+        const uint64_t targetAddress =
+            reinterpret_cast<uint64_t>(pCleanupReplayPlaybackOriginal);
+        if (targetAddress == 0) {
+            LOG(LL_ERR, "Enhanced CleanupReplayPlayback original target is null");
+            return false;
+        }
+
+        constexpr size_t patchSize = sizeof(g_cleanupOriginalBytes);
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(targetAddress), patchSize,
+                            PAGE_EXECUTE_READWRITE, &oldProtect)) {
+            LOG(LL_ERR, "Failed to restore Enhanced CleanupReplayPlayback bytes. error=",
+                GetLastError());
+            return false;
+        }
+
+        std::memcpy(reinterpret_cast<void*>(targetAddress), g_cleanupOriginalBytes, patchSize);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(targetAddress), patchSize);
+        DWORD unused = 0;
+        VirtualProtect(reinterpret_cast<void*>(targetAddress), patchSize, oldProtect, &unused);
+
+        bool originalCallSucceeded = true;
+        try {
+            reinterpret_cast<CleanupReplayPlaybackInternalFunc>(targetAddress)();
+        } catch (const std::exception& ex) {
+            LOG(LL_ERR, "Enhanced CleanupReplayPlayback original threw: ", ex.what());
+            originalCallSucceeded = false;
+        } catch (...) {
+            LOG(LL_ERR, "Enhanced CleanupReplayPlayback original threw an unknown exception");
+            originalCallSucceeded = false;
+        }
+
+        const bool hookRestored = installAbsoluteJumpHook(
+            targetAddress,
+            reinterpret_cast<uintptr_t>(GameHooks::EnhancedCleanupReplayPlayback::Implementation));
+        if (!hookRestored) {
+            LOG(LL_ERR, "Failed to reinstall Enhanced CleanupReplayPlayback manual hook");
+        }
+
+        return originalCallSucceeded && hookRestored;
+    }
+
+    bool callEnhancedKillPlaybackOrBakeOriginal(bool userCancelled) {
+        const uint64_t targetAddress =
+            reinterpret_cast<uint64_t>(pEnhancedKillPlaybackOrBakeOriginal);
+        if (targetAddress == 0) {
+            LOG(LL_ERR, "Enhanced KillPlaybackOrBake original target is null");
+            return false;
+        }
+
+        constexpr size_t patchSize = sizeof(g_enhancedKillPlaybackOrBakeOriginalBytes);
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(targetAddress), patchSize,
+                            PAGE_EXECUTE_READWRITE, &oldProtect)) {
+            LOG(LL_ERR, "Failed to restore Enhanced KillPlaybackOrBake bytes. error=",
+                GetLastError());
+            return false;
+        }
+
+        std::memcpy(reinterpret_cast<void*>(targetAddress),
+                    g_enhancedKillPlaybackOrBakeOriginalBytes, patchSize);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(targetAddress), patchSize);
+        DWORD unused = 0;
+        VirtualProtect(reinterpret_cast<void*>(targetAddress), patchSize, oldProtect, &unused);
+
+        bool originalCallSucceeded = true;
+        try {
+            reinterpret_cast<EnhancedKillPlaybackOrBakeFunc>(targetAddress)(userCancelled);
+        } catch (const std::exception& ex) {
+            LOG(LL_ERR, "Enhanced KillPlaybackOrBake original threw: ", ex.what());
+            originalCallSucceeded = false;
+        } catch (...) {
+            LOG(LL_ERR, "Enhanced KillPlaybackOrBake original threw an unknown exception");
+            originalCallSucceeded = false;
+        }
+
+        const bool hookRestored = installAbsoluteJumpHook(
+            targetAddress,
+            reinterpret_cast<uintptr_t>(GameHooks::EnhancedKillPlaybackOrBake::Implementation));
+        if (!hookRestored) {
+            LOG(LL_ERR, "Failed to reinstall Enhanced KillPlaybackOrBake manual hook");
+        }
+
+        return originalCallSucceeded && hookRestored;
+    }
+
+    bool prepareEnhancedKillPass1ExitPatch(uint64_t functionAddress) {
+        if (functionAddress == 0) return false;
+
+        // The first destructive transition in Enhanced 1.0.1158.13 stores -1 in
+        // the recording-instance index. Everything before it includes the call
+        // that causes Media Foundation to finalize the current pass. Resolve the
+        // boundary from the instruction bytes instead of relying on a bare RVA.
+        const auto* bytes = reinterpret_cast<const uint8_t*>(functionAddress);
+        for (size_t offset = 0; offset + 12 <= 0x180; ++offset) {
+            if (bytes[offset + 0] != 0xC7 || bytes[offset + 1] != 0x05 ||
+                bytes[offset + 6] != 0xFF || bytes[offset + 7] != 0xFF ||
+                bytes[offset + 8] != 0xFF || bytes[offset + 9] != 0xFF ||
+                bytes[offset + 10] != 0xC7 || bytes[offset + 11] != 0x05) {
+                continue;
+            }
+
+            g_enhancedKillPass1ExitPatchAddress = functionAddress + offset;
+            break;
+        }
+
+        if (g_enhancedKillPass1ExitPatchAddress == 0) {
+            LOG(LL_ERR, "Enhanced KillPlaybackOrBake pass-one exit boundary was not found");
+            return false;
+        }
+
+        // This stub is entered after the original prologue (push rsi; push rbx;
+        // sub rsp, 28h), so it performs the matching epilogue and returns to the
+        // original caller without executing the destructive state stores.
+        constexpr std::array<uint8_t, 7> exitStub = {
+            0x48, 0x83, 0xC4, 0x28, // add rsp, 28h
+            0x5B,                   // pop rbx
+            0x5E,                   // pop rsi
+            0xC3                    // ret
+        };
+        g_enhancedKillPass1ExitStub = VirtualAlloc(
+            nullptr, exitStub.size(), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (g_enhancedKillPass1ExitStub == nullptr) {
+            LOG(LL_ERR, "Failed to allocate Enhanced pass-one KillPlaybackOrBake exit stub. error=",
+                GetLastError());
+            g_enhancedKillPass1ExitPatchAddress = 0;
+            return false;
+        }
+
+        std::memcpy(g_enhancedKillPass1ExitStub, exitStub.data(), exitStub.size());
+        FlushInstructionCache(GetCurrentProcess(), g_enhancedKillPass1ExitStub, exitStub.size());
+        LOG(LL_NFO, "Enhanced KillPlaybackOrBake pass-one exit boundary resolved. patch=",
+            Logger::hex(g_enhancedKillPass1ExitPatchAddress, 16), " stub=",
+            g_enhancedKillPass1ExitStub);
+        return true;
+    }
+
+    bool callEnhancedKillPlaybackOrBakeThroughFinalize() {
+        if (g_enhancedKillPass1ExitPatchAddress == 0 ||
+            g_enhancedKillPass1ExitStub == nullptr) {
+            LOG(LL_ERR, "Enhanced pass-one KillPlaybackOrBake exit patch is unavailable");
+            return false;
+        }
+
+        constexpr size_t patchSize = 12;
+        std::array<uint8_t, patchSize> originalInternalBytes{};
+        std::memcpy(originalInternalBytes.data(),
+                    reinterpret_cast<const void*>(g_enhancedKillPass1ExitPatchAddress),
+                    patchSize);
+
+        if (originalInternalBytes[0] != 0xC7 || originalInternalBytes[1] != 0x05 ||
+            originalInternalBytes[6] != 0xFF || originalInternalBytes[7] != 0xFF ||
+            originalInternalBytes[8] != 0xFF || originalInternalBytes[9] != 0xFF ||
+            originalInternalBytes[10] != 0xC7 || originalInternalBytes[11] != 0x05) {
+            LOG(LL_ERR, "Enhanced pass-one KillPlaybackOrBake exit bytes changed; refusing partial execution");
+            return false;
+        }
+
+        if (!installAbsoluteJumpHook(
+                g_enhancedKillPass1ExitPatchAddress,
+                reinterpret_cast<uintptr_t>(g_enhancedKillPass1ExitStub))) {
+            LOG(LL_ERR, "Failed to install temporary Enhanced pass-one exit patch");
+            return false;
+        }
+
+        LOG(LL_NFO, "Executing Enhanced KillPlaybackOrBake through Finalize trigger, before destructive stores");
+        const bool callSucceeded = callEnhancedKillPlaybackOrBakeOriginal(false);
+
+        DWORD oldProtect = 0;
+        bool restoreSucceeded = VirtualProtect(
+            reinterpret_cast<void*>(g_enhancedKillPass1ExitPatchAddress), patchSize,
+            PAGE_EXECUTE_READWRITE, &oldProtect) != FALSE;
+        if (restoreSucceeded) {
+            std::memcpy(reinterpret_cast<void*>(g_enhancedKillPass1ExitPatchAddress),
+                        originalInternalBytes.data(), patchSize);
+            FlushInstructionCache(GetCurrentProcess(),
+                                  reinterpret_cast<void*>(g_enhancedKillPass1ExitPatchAddress),
+                                  patchSize);
+            DWORD unused = 0;
+            VirtualProtect(reinterpret_cast<void*>(g_enhancedKillPass1ExitPatchAddress),
+                           patchSize, oldProtect, &unused);
+        } else {
+            LOG(LL_ERR, "Failed to restore Enhanced pass-one exit bytes. error=", GetLastError());
+        }
+
+        return callSucceeded && restoreSucceeded;
+    }
+
     uint64_t resolveIsPendingBakeStartFunction(uint64_t patternMatchAddress) {
         if (patternMatchAddress == 0) {
             return 0;
@@ -885,7 +1328,7 @@ namespace {
             LOG(LL_NFO, "Intercepting CleanupReplayPlaybackInternal after Pass 1");
             try {
                 uint64_t cleanupAddr = reinterpret_cast<uint64_t>(pCleanupReplayPlaybackOriginal);
-                
+
                 LOG(LL_DBG, "Temporarily restoring original bytes at 0x", std::hex, cleanupAddr);
                 
                 // Restore original bytes
@@ -1008,9 +1451,69 @@ namespace {
         
         LOG(LL_TRC, "IsPendingBakeStart called, original result: ", originalResult);
         
+        if (g_isEnhancedEdition && dualPassContext &&
+            dualPassContext->state == DualPassState::PASS1_COMPLETE &&
+            !g_pass2TriggerIssued.load() &&
+            pCleanupReplayPlaybackOriginal != nullptr &&
+            std::this_thread::get_id() == mainThreadId &&
+            !g_enhancedIsPendingHandoffInProgress) {
+            g_enhancedIsPendingHandoffInProgress = true;
+            LOG(LL_NFO, "IsPendingBakeStart: triggering Enhanced pass-one cleanup on the main thread");
+            try {
+                reinterpret_cast<CleanupReplayPlaybackInternalFunc>(
+                    pCleanupReplayPlaybackOriginal)();
+            } catch (const std::exception& ex) {
+                LOG(LL_ERR, "IsPendingBakeStart cleanup handoff exception: ", ex.what());
+                g_pass2TriggerIssued = false;
+            } catch (...) {
+                LOG(LL_ERR, "IsPendingBakeStart cleanup handoff unknown exception");
+                g_pass2TriggerIssued = false;
+            }
+            g_enhancedIsPendingHandoffInProgress = false;
+        }
+
+        if (g_isEnhancedEdition && dualPassContext &&
+            dualPassContext->state == DualPassState::PASS2_PENDING &&
+            std::this_thread::get_id() == mainThreadId) {
+            // Returning TRUE keeps Enhanced's loading gate active and pauses
+            // ScriptMain. Release it temporarily so ScriptMain can count the
+            // normal frame delay and start Pass 2 from a settled game frame.
+            LOG(LL_NFO, "IsPendingBakeStart: releasing Enhanced loading gate for delayed pass-two startup");
+            POST();
+            return false;
+        }
+
+        if (g_isEnhancedEdition && dualPassContext &&
+            dualPassContext->state == DualPassState::PASS2_COMPLETE &&
+            pCleanupReplayPlaybackOriginal != nullptr &&
+            std::this_thread::get_id() == mainThreadId &&
+            !g_enhancedIsPendingHandoffInProgress) {
+            // Enhanced may leave the pending-bake screen active after the
+            // second sink finalizes. Its script fiber is still paused here, so
+            // perform the normal replay cleanup from the same main-thread poll
+            // that owns the UI state.
+            g_enhancedIsPendingHandoffInProgress = true;
+            LOG(LL_NFO, "IsPendingBakeStart: triggering Enhanced pass-two final cleanup on the main thread");
+            try {
+                reinterpret_cast<CleanupReplayPlaybackInternalFunc>(
+                    pCleanupReplayPlaybackOriginal)();
+            } catch (const std::exception& ex) {
+                LOG(LL_ERR, "IsPendingBakeStart final cleanup exception: ", ex.what());
+            } catch (...) {
+                LOG(LL_ERR, "IsPendingBakeStart final cleanup unknown exception");
+            }
+            g_enhancedIsPendingHandoffInProgress = false;
+
+            if (dualPassContext->state == DualPassState::IDLE) {
+                LOG(LL_NFO, "IsPendingBakeStart: Enhanced dual-pass UI cleanup completed");
+                POST();
+                return false;
+            }
+        }
+
         if (dualPassContext) {
             if (dualPassContext->state == DualPassState::PASS1_COMPLETE ||
-                dualPassContext->state == DualPassState::PASS2_PENDING) {
+                (!g_isEnhancedEdition && dualPassContext->state == DualPassState::PASS2_PENDING)) {
                 LOG(LL_DBG, "IsPendingBakeStart: Overriding to TRUE for dual-pass transition");
                 LOG(LL_DBG, "  Dual-pass state: ", static_cast<int>(dualPassContext->state));
                 LOG(LL_DBG, "  Keeping loading screen visible until Pass 2 starts");
@@ -1276,12 +1779,15 @@ namespace {
         }
 
         dualPassContext->state = DualPassState::PASS2_PENDING;
-        g_pass2StartupDelayFrames = kPass2StartupDelayFrames;
+        // Enhanced releases its pending-bake gate below so ScriptMain can
+        // advance this delay per rendered frame, just like Legacy.
+        const int startupDelayTicks = kPass2StartupDelayFrames;
+        g_pass2StartupDelayFrames = startupDelayTicks;
         g_pass2StartupPending = true;
         g_pass2TriggerIssued = true;
 
         LOG(LL_NFO, "Scheduling Pass 2 startup on main thread after ",
-            Logger::hex(static_cast<uint64_t>(kPass2StartupDelayFrames), 2),
+            Logger::hex(static_cast<uint64_t>(startupDelayTicks), 2),
             " frames. reason=", reason);
     }
 
@@ -1317,15 +1823,22 @@ namespace {
             return false;
         }
 
-        if (!GameHooks::StartBakeProject::OriginalFunc) {
-            LOG(LL_ERR, "Pass 2 startup: StartBakeProject::OriginalFunc is NULL");
+        const bool startFunctionAvailable = g_isEnhancedEdition
+            ? GameHooks::EnhancedStartBakeProject::OriginalFunc != nullptr
+            : GameHooks::StartBakeProject::OriginalFunc != nullptr;
+        if (!startFunctionAvailable) {
+            LOG(LL_ERR, "Pass 2 startup: edition-specific StartBakeProject::OriginalFunc is NULL");
             dualPassContext->state = DualPassState::IDLE;
             dualPassContext->audio_buffer.clear();
             g_pass2TriggerIssued = false;
             return false;
         }
 
-        if (!dualPassContext->saved_video_editor_interface || !dualPassContext->saved_montage_ptr) {
+        const bool savedArgumentsValid = g_isEnhancedEdition
+            ? dualPassContext->saved_video_editor_interface != nullptr
+            : dualPassContext->saved_video_editor_interface != nullptr &&
+              dualPassContext->saved_montage_ptr != nullptr;
+        if (!savedArgumentsValid) {
             LOG(LL_ERR, "Pass 2 startup: saved pointers are invalid. interface=",
                 reinterpret_cast<void*>(dualPassContext->saved_video_editor_interface),
                 " montage=", reinterpret_cast<void*>(dualPassContext->saved_montage_ptr));
@@ -1350,9 +1863,18 @@ namespace {
 
         bool result = false;
         try {
-            result = GameHooks::StartBakeProject::OriginalFunc(
-                dualPassContext->saved_video_editor_interface,
-                dualPassContext->saved_montage_ptr);
+            if (g_isEnhancedEdition) {
+                const char* exportName = dualPassContext->enhanced_export_name_present
+                    ? dualPassContext->enhanced_export_name.c_str()
+                    : nullptr;
+                result = GameHooks::EnhancedStartBakeProject::OriginalFunc(
+                    dualPassContext->saved_video_editor_interface,
+                    exportName);
+            } else {
+                result = GameHooks::StartBakeProject::OriginalFunc(
+                    dualPassContext->saved_video_editor_interface,
+                    dualPassContext->saved_montage_ptr);
+            }
         } catch (const std::exception& ex) {
             LOG(LL_ERR, "Pass 2 startup exception: ", ex.what());
         } catch (...) {
@@ -1370,6 +1892,1019 @@ namespace {
         }
 
         return true;
+    }
+
+
+    std::string getD3D12ResourceDebugName(reshade::api::device* device, reshade::api::resource resource) {
+        if (device == nullptr || resource.handle == 0 ||
+            device->get_api() != reshade::api::device_api::d3d12) {
+            return {};
+        }
+
+        auto* nativeResource = reinterpret_cast<ID3D12Resource*>(resource.handle);
+        UINT sizeBytes = 0;
+        if (SUCCEEDED(nativeResource->GetPrivateData(WKPDID_D3DDebugObjectNameW, &sizeBytes, nullptr)) &&
+            sizeBytes >= sizeof(wchar_t)) {
+            std::vector<wchar_t> wideName(sizeBytes / sizeof(wchar_t) + 1, L'\0');
+            if (SUCCEEDED(nativeResource->GetPrivateData(
+                    WKPDID_D3DDebugObjectNameW, &sizeBytes, wideName.data()))) {
+                size_t length = sizeBytes / sizeof(wchar_t);
+                while (length > 0 && wideName[length - 1] == L'\0') --length;
+                return utf8_encode(std::wstring(wideName.data(), length));
+            }
+        }
+
+        sizeBytes = 0;
+        if (SUCCEEDED(nativeResource->GetPrivateData(WKPDID_D3DDebugObjectName, &sizeBytes, nullptr)) &&
+            sizeBytes > 0) {
+            std::string ansiName(sizeBytes, '\0');
+            if (SUCCEEDED(nativeResource->GetPrivateData(
+                    WKPDID_D3DDebugObjectName, &sizeBytes, ansiName.data()))) {
+                while (!ansiName.empty() && ansiName.back() == '\0') ansiName.pop_back();
+                return ansiName;
+            }
+        }
+
+        return {};
+    }
+
+    void tryTrackEnhancedVideoResource(reshade::api::device* device, reshade::api::resource resource,
+                                       reshade::api::resource_usage state) {
+        if (!g_isEnhancedEdition || device == nullptr || resource.handle == 0 ||
+            device->get_api() != reshade::api::device_api::d3d12) {
+            return;
+        }
+
+        const std::string name = getD3D12ResourceDebugName(device, resource);
+        if (name.rfind("VideoEncode", 0) != 0) return;
+
+        const reshade::api::resource_desc desc = device->get_resource_desc(resource);
+        std::lock_guard<std::mutex> resourceLock(enhancedResourceMutex);
+        if (enhancedVideoEncodeResource.handle != resource.handle) {
+            enhancedVideoEncodeResource = resource;
+            enhancedVideoEncodeState = state;
+            enhancedVideoResourceTracked.store(true, std::memory_order_release);
+            LOG(LL_NFO, "Enhanced VideoEncode resource discovered via D3D12 debug name. name=", name,
+                " handle=", Logger::hex(resource.handle, 16), " resolution=",
+                desc.texture.width, "x", desc.texture.height,
+                " format=", static_cast<uint32_t>(desc.texture.format));
+        } else {
+            enhancedVideoEncodeState = state;
+        }
+    }
+
+    void resetEnhancedCaptureTracking() {
+        enhancedPendingVideoFrames.store(0, std::memory_order_release);
+        enhancedExpectedWidth.store(0, std::memory_order_release);
+        enhancedExpectedHeight.store(0, std::memory_order_release);
+        enhancedVideoResourceTracked.store(false, std::memory_order_release);
+        enhancedCaptureGeneration.fetch_add(1, std::memory_order_acq_rel);
+
+        {
+            std::lock_guard<std::mutex> resourceLock(enhancedResourceMutex);
+            enhancedVideoEncodeResource = {};
+            enhancedVideoEncodeState = reshade::api::resource_usage::undefined;
+            enhancedCleanCandidateDevice = nullptr;
+            enhancedCleanCandidateResource = {};
+            enhancedCleanCandidateState = reshade::api::resource_usage::undefined;
+            enhancedDepthCandidateDevice = nullptr;
+            enhancedDepthCandidateResource = {};
+            enhancedDepthCandidateState = reshade::api::resource_usage::undefined;
+        }
+
+        {
+            std::lock_guard<std::mutex> diagnosticLock(enhancedDiagnosticMutex);
+            enhancedLoggedRenderTargetHandles.clear();
+            enhancedLoggedDepthStencilHandles.clear();
+            enhancedLoggedCopySourceHandles.clear();
+        }
+        hasLoggedEnhancedBackBuffer.store(false, std::memory_order_release);
+        hasLoggedEnhancedCleanCapture.store(false, std::memory_order_release);
+        enhancedPostEffectsCaptureReady.store(false, std::memory_order_release);
+        enhancedPostEffectsBackBufferHandle.store(0, std::memory_order_release);
+        hasLoggedEnhancedPreEffectsReplacement.store(false, std::memory_order_release);
+        hasLoggedEnhancedMissingDepth.store(false, std::memory_order_release);
+        enhancedOpenExrPayloadValidated.store(false, std::memory_order_release);
+        enhancedCaptureDepth.clear();
+        enhancedMotionBlur = {};
+        enhancedGpuMotionBlur.subframeIndex = 0;
+        enhancedGpuMotionBlur.accumulatedSamples = 0;
+        enhancedGpuMotionBlur.configuredSamples = 0;
+        enhancedGpuMotionBlur.configuredStrength = 0.0f;
+        enhancedGpuMotionBlur.consumedSubframes = 0;
+        enhancedGpuMotionBlur.emittedFrames = 0;
+        enhancedGpuMotionBlur.creationFailed = false;
+    }
+
+    bool copyEnhancedMappedPixels(const reshade::api::subresource_data& mapped,
+                                  reshade::api::format format,
+                                  uint32_t width,
+                                  uint32_t height,
+                                  std::vector<uint8_t>& pixels) {
+        const reshade::api::format viewFormat = reshade::api::format_to_default_typed(format, 0);
+        const size_t outputRowPitch = static_cast<size_t>(width) * 4;
+        pixels.resize(outputRowPitch * static_cast<size_t>(height));
+
+        auto* destination = pixels.data();
+        auto* sourcePixels = static_cast<const uint8_t*>(mapped.data);
+        for (uint32_t y = 0; y < height; ++y,
+             destination += outputRowPitch, sourcePixels += mapped.row_pitch) {
+            switch (viewFormat) {
+            case reshade::api::format::r8g8b8a8_unorm:
+            case reshade::api::format::r8g8b8x8_unorm:
+                std::memcpy(destination, sourcePixels, outputRowPitch);
+                if (viewFormat == reshade::api::format::r8g8b8x8_unorm)
+                    for (size_t x = 3; x < outputRowPitch; x += 4) destination[x] = 0xFF;
+                break;
+            case reshade::api::format::b8g8r8a8_unorm:
+            case reshade::api::format::b8g8r8x8_unorm:
+                std::memcpy(destination, sourcePixels, outputRowPitch);
+                for (size_t x = 0; x < outputRowPitch; x += 4) {
+                    std::swap(destination[x], destination[x + 2]);
+                    if (viewFormat == reshade::api::format::b8g8r8x8_unorm) destination[x + 3] = 0xFF;
+                }
+                break;
+            case reshade::api::format::r10g10b10a2_unorm:
+            case reshade::api::format::b10g10r10a2_unorm:
+                for (uint32_t x = 0; x < width; ++x) {
+                    const uint32_t packed = reinterpret_cast<const uint32_t*>(sourcePixels)[x];
+                    destination[x * 4 + 0] = static_cast<uint8_t>((packed & 0x3FF) >> 2);
+                    destination[x * 4 + 1] = static_cast<uint8_t>(((packed >> 10) & 0x3FF) >> 2);
+                    destination[x * 4 + 2] = static_cast<uint8_t>(((packed >> 20) & 0x3FF) >> 2);
+                    destination[x * 4 + 3] = static_cast<uint8_t>(((packed >> 30) & 0x3) * 85);
+                    if (viewFormat == reshade::api::format::b10g10r10a2_unorm)
+                        std::swap(destination[x * 4], destination[x * 4 + 2]);
+                }
+                break;
+            default:
+                return false;
+            }
+        }
+        return true;
+    }
+
+    reshade::api::format enhancedDepthReadbackPlaneFormat(reshade::api::format sourceFormat) {
+        switch (reshade::api::format_to_depth_stencil_typed(sourceFormat)) {
+        case reshade::api::format::d16_unorm:
+            return reshade::api::format::r16_unorm;
+        case reshade::api::format::d24_unorm_s8_uint:
+            return reshade::api::format::r24_unorm_x8_uint;
+        case reshade::api::format::d32_float:
+        case reshade::api::format::d32_float_s8_uint:
+            // Plane 0 of D32/S8 is a tightly packed R32_FLOAT plane. A readback
+            // footprint using the combined eight-byte depth/stencil format is
+            // invalid and causes the entire D3D12 copy batch to read as zeros.
+            return reshade::api::format::r32_float;
+        default:
+            return reshade::api::format::unknown;
+        }
+    }
+
+    bool copyEnhancedMappedDepth(const reshade::api::subresource_data& mapped,
+                                 reshade::api::format format,
+                                 uint32_t width,
+                                 uint32_t height,
+                                 std::vector<float>& depth) {
+        if (mapped.data == nullptr || mapped.row_pitch == 0 || width == 0 || height == 0) {
+            return false;
+        }
+
+        const reshade::api::format typedFormat =
+            reshade::api::format_to_default_typed(format, 0);
+        depth.resize(static_cast<size_t>(width) * height);
+
+        for (uint32_t y = 0; y < height; ++y) {
+            const auto* sourceRow = static_cast<const uint8_t*>(mapped.data) +
+                                    static_cast<size_t>(y) * mapped.row_pitch;
+            float* destinationRow = depth.data() + static_cast<size_t>(y) * width;
+
+            switch (typedFormat) {
+            case reshade::api::format::r16_unorm:
+                for (uint32_t x = 0; x < width; ++x) {
+                    destinationRow[x] = static_cast<float>(
+                        reinterpret_cast<const uint16_t*>(sourceRow)[x]) / 65535.0f;
+                }
+                break;
+            case reshade::api::format::r24_unorm_x8_uint:
+                for (uint32_t x = 0; x < width; ++x) {
+                    const uint32_t packed = reinterpret_cast<const uint32_t*>(sourceRow)[x];
+                    destinationRow[x] = static_cast<float>(packed & 0x00FFFFFFu) / 16777215.0f;
+                }
+                break;
+            case reshade::api::format::r32_float:
+                std::memcpy(destinationRow, sourceRow, static_cast<size_t>(width) * sizeof(float));
+                break;
+            default:
+                depth.clear();
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    void destroyEnhancedGpuMotionBlurResourcesLocked() {
+        auto* const device = enhancedGpuMotionBlur.device;
+        if (device != nullptr) {
+            if (enhancedGpuMotionBlur.sourceSrv.handle != 0)
+                device->destroy_resource_view(enhancedGpuMotionBlur.sourceSrv);
+            if (enhancedGpuMotionBlur.accumulationSrv.handle != 0)
+                device->destroy_resource_view(enhancedGpuMotionBlur.accumulationSrv);
+            if (enhancedGpuMotionBlur.accumulationRtv.handle != 0)
+                device->destroy_resource_view(enhancedGpuMotionBlur.accumulationRtv);
+            if (enhancedGpuMotionBlur.finalRtv.handle != 0)
+                device->destroy_resource_view(enhancedGpuMotionBlur.finalRtv);
+            if (enhancedGpuMotionBlur.accumulatePipeline.handle != 0)
+                device->destroy_pipeline(enhancedGpuMotionBlur.accumulatePipeline);
+            if (enhancedGpuMotionBlur.dividePipeline.handle != 0)
+                device->destroy_pipeline(enhancedGpuMotionBlur.dividePipeline);
+            if (enhancedGpuMotionBlur.pipelineLayout.handle != 0)
+                device->destroy_pipeline_layout(enhancedGpuMotionBlur.pipelineLayout);
+            if (enhancedGpuMotionBlur.sourceCopy.handle != 0)
+                device->destroy_resource(enhancedGpuMotionBlur.sourceCopy);
+            if (enhancedGpuMotionBlur.accumulation.handle != 0)
+                device->destroy_resource(enhancedGpuMotionBlur.accumulation);
+            if (enhancedGpuMotionBlur.finalOutput.handle != 0)
+                device->destroy_resource(enhancedGpuMotionBlur.finalOutput);
+        }
+        enhancedGpuMotionBlur = {};
+    }
+
+    bool ensureEnhancedGpuMotionBlurResourcesLocked(
+        reshade::api::effect_runtime* runtime,
+        const reshade::api::resource_desc& sourceDesc) {
+        if (runtime == nullptr || runtime->get_device() == nullptr ||
+            runtime->get_device()->get_api() != reshade::api::device_api::d3d12 ||
+            Config::Manager::export_openexr) {
+            return false;
+        }
+
+        auto* const device = runtime->get_device();
+        const reshade::api::format sourceFormat =
+            reshade::api::format_to_default_typed(sourceDesc.texture.format, 0);
+        const bool supportedFormat =
+            sourceFormat == reshade::api::format::r8g8b8a8_unorm ||
+            sourceFormat == reshade::api::format::b8g8r8a8_unorm;
+        if (!supportedFormat || sourceDesc.texture.samples != 1) return false;
+
+        if (enhancedGpuMotionBlur.runtime == runtime &&
+            enhancedGpuMotionBlur.device == device &&
+            enhancedGpuMotionBlur.width == sourceDesc.texture.width &&
+            enhancedGpuMotionBlur.height == sourceDesc.texture.height &&
+            enhancedGpuMotionBlur.sourceFormat == sourceFormat &&
+            enhancedGpuMotionBlur.sourceCopy.handle != 0 &&
+            !enhancedGpuMotionBlur.creationFailed) {
+            return true;
+        }
+
+        destroyEnhancedGpuMotionBlurResourcesLocked();
+        enhancedGpuMotionBlur.runtime = runtime;
+        enhancedGpuMotionBlur.device = device;
+        enhancedGpuMotionBlur.width = sourceDesc.texture.width;
+        enhancedGpuMotionBlur.height = sourceDesc.texture.height;
+        enhancedGpuMotionBlur.sourceFormat = sourceFormat;
+
+        const auto sourceUsage = reshade::api::resource_usage::copy_dest |
+                                 reshade::api::resource_usage::shader_resource;
+        const auto accumulationUsage = reshade::api::resource_usage::render_target |
+                                       reshade::api::resource_usage::shader_resource;
+        const auto finalUsage = reshade::api::resource_usage::render_target |
+                                reshade::api::resource_usage::copy_source;
+        constexpr reshade::api::format accumulationFormat =
+            reshade::api::format::r16g16b16a16_float;
+
+        bool ok = device->create_resource(
+            reshade::api::resource_desc(enhancedGpuMotionBlur.width, enhancedGpuMotionBlur.height,
+                1, 1, sourceFormat, 1, reshade::api::memory_heap::gpu_only, sourceUsage),
+            nullptr, reshade::api::resource_usage::shader_resource,
+            &enhancedGpuMotionBlur.sourceCopy);
+        ok = ok && device->create_resource(
+            reshade::api::resource_desc(enhancedGpuMotionBlur.width, enhancedGpuMotionBlur.height,
+                1, 1, accumulationFormat, 1, reshade::api::memory_heap::gpu_only, accumulationUsage),
+            nullptr, reshade::api::resource_usage::shader_resource,
+            &enhancedGpuMotionBlur.accumulation);
+        ok = ok && device->create_resource(
+            reshade::api::resource_desc(enhancedGpuMotionBlur.width, enhancedGpuMotionBlur.height,
+                1, 1, sourceFormat, 1, reshade::api::memory_heap::gpu_only, finalUsage),
+            nullptr, reshade::api::resource_usage::copy_source,
+            &enhancedGpuMotionBlur.finalOutput);
+        ok = ok && device->create_resource_view(
+            enhancedGpuMotionBlur.sourceCopy, reshade::api::resource_usage::shader_resource,
+            reshade::api::resource_view_desc(sourceFormat), &enhancedGpuMotionBlur.sourceSrv);
+        ok = ok && device->create_resource_view(
+            enhancedGpuMotionBlur.accumulation, reshade::api::resource_usage::shader_resource,
+            reshade::api::resource_view_desc(accumulationFormat), &enhancedGpuMotionBlur.accumulationSrv);
+        ok = ok && device->create_resource_view(
+            enhancedGpuMotionBlur.accumulation, reshade::api::resource_usage::render_target,
+            reshade::api::resource_view_desc(accumulationFormat), &enhancedGpuMotionBlur.accumulationRtv);
+        ok = ok && device->create_resource_view(
+            enhancedGpuMotionBlur.finalOutput, reshade::api::resource_usage::render_target,
+            reshade::api::resource_view_desc(sourceFormat), &enhancedGpuMotionBlur.finalRtv);
+
+        const reshade::api::pipeline_layout_param layoutParams[2] = {
+            reshade::api::descriptor_range { 0, 0, 0, 1, reshade::api::shader_stage::pixel,
+                                             1, reshade::api::descriptor_type::shader_resource_view },
+            reshade::api::constant_range { 0, 0, 0, 4, reshade::api::shader_stage::pixel }
+        };
+        ok = ok && device->create_pipeline_layout(2, layoutParams,
+                                                   &enhancedGpuMotionBlur.pipelineLayout);
+
+        reshade::api::shader_desc vsDesc = {
+            VSFullScreenEnhanced::g_main, sizeof(VSFullScreenEnhanced::g_main) };
+        reshade::api::shader_desc accumulatePsDesc = {
+            PSAccumulateEnhanced::g_main, sizeof(PSAccumulateEnhanced::g_main) };
+        reshade::api::shader_desc dividePsDesc = {
+            PSDivideEnhanced::g_main, sizeof(PSDivideEnhanced::g_main) };
+        reshade::api::primitive_topology topology = reshade::api::primitive_topology::triangle_strip;
+        reshade::api::rasterizer_desc rasterizer{};
+        rasterizer.cull_mode = reshade::api::cull_mode::none;
+        reshade::api::depth_stencil_desc depthStencil{};
+        depthStencil.depth_enable = false;
+        depthStencil.depth_write_mask = false;
+        reshade::api::blend_desc additiveBlend{};
+        additiveBlend.blend_enable[0] = true;
+        additiveBlend.source_color_blend_factor[0] = reshade::api::blend_factor::one;
+        additiveBlend.dest_color_blend_factor[0] = reshade::api::blend_factor::one;
+        additiveBlend.source_alpha_blend_factor[0] = reshade::api::blend_factor::one;
+        additiveBlend.dest_alpha_blend_factor[0] = reshade::api::blend_factor::one;
+
+        std::vector<reshade::api::pipeline_subobject> accumulateSubobjects = {
+            { reshade::api::pipeline_subobject_type::vertex_shader, 1, &vsDesc },
+            { reshade::api::pipeline_subobject_type::pixel_shader, 1, &accumulatePsDesc },
+            { reshade::api::pipeline_subobject_type::blend_state, 1, &additiveBlend },
+            { reshade::api::pipeline_subobject_type::rasterizer_state, 1, &rasterizer },
+            { reshade::api::pipeline_subobject_type::depth_stencil_state, 1, &depthStencil },
+            { reshade::api::pipeline_subobject_type::primitive_topology, 1, &topology },
+            { reshade::api::pipeline_subobject_type::render_target_formats, 1,
+              const_cast<reshade::api::format*>(&accumulationFormat) }
+        };
+        ok = ok && device->create_pipeline(
+            enhancedGpuMotionBlur.pipelineLayout,
+            static_cast<uint32_t>(accumulateSubobjects.size()), accumulateSubobjects.data(),
+            &enhancedGpuMotionBlur.accumulatePipeline);
+
+        reshade::api::blend_desc opaqueBlend{};
+        std::vector<reshade::api::pipeline_subobject> divideSubobjects = {
+            { reshade::api::pipeline_subobject_type::vertex_shader, 1, &vsDesc },
+            { reshade::api::pipeline_subobject_type::pixel_shader, 1, &dividePsDesc },
+            { reshade::api::pipeline_subobject_type::blend_state, 1, &opaqueBlend },
+            { reshade::api::pipeline_subobject_type::rasterizer_state, 1, &rasterizer },
+            { reshade::api::pipeline_subobject_type::depth_stencil_state, 1, &depthStencil },
+            { reshade::api::pipeline_subobject_type::primitive_topology, 1, &topology },
+            { reshade::api::pipeline_subobject_type::render_target_formats, 1,
+              &enhancedGpuMotionBlur.sourceFormat }
+        };
+        ok = ok && device->create_pipeline(
+            enhancedGpuMotionBlur.pipelineLayout,
+            static_cast<uint32_t>(divideSubobjects.size()), divideSubobjects.data(),
+            &enhancedGpuMotionBlur.dividePipeline);
+
+        if (!ok) {
+            LOG(LL_ERR, "Failed to create Enhanced D3D12 GPU motion-blur resources; using CPU fallback");
+            destroyEnhancedGpuMotionBlurResourcesLocked();
+            enhancedGpuMotionBlur.runtime = runtime;
+            enhancedGpuMotionBlur.device = device;
+            enhancedGpuMotionBlur.width = sourceDesc.texture.width;
+            enhancedGpuMotionBlur.height = sourceDesc.texture.height;
+            enhancedGpuMotionBlur.sourceFormat = sourceFormat;
+            enhancedGpuMotionBlur.creationFailed = true;
+            return false;
+        }
+
+        LOG(LL_NFO, "Enhanced D3D12 GPU motion blur initialized. resolution=",
+            enhancedGpuMotionBlur.width, "x", enhancedGpuMotionBlur.height,
+            " accumulationFormat=RGBA16F outputFormat=", static_cast<uint32_t>(sourceFormat));
+        return true;
+    }
+
+    void destroyEnhancedReadbackResourcesLocked() {
+        if (enhancedReadbackDevice != nullptr) {
+            for (auto& slot : enhancedReadbackSlots) {
+                if (slot.resource.handle != 0) enhancedReadbackDevice->destroy_resource(slot.resource);
+                if (slot.depthResource.handle != 0) enhancedReadbackDevice->destroy_resource(slot.depthResource);
+                if (slot.fence.handle != 0) enhancedReadbackDevice->destroy_fence(slot.fence);
+                slot = {};
+            }
+        } else {
+            for (auto& slot : enhancedReadbackSlots) slot = {};
+        }
+        enhancedReadbackOrder.clear();
+        enhancedReadbackCursor = 0;
+        enhancedReadbackRuntime = nullptr;
+        enhancedReadbackDevice = nullptr;
+        enhancedReadbackWidth = 0;
+        enhancedReadbackHeight = 0;
+        enhancedReadbackFormat = reshade::api::format::unknown;
+        enhancedReadbackDepthSourceFormat = reshade::api::format::unknown;
+        enhancedReadbackDepthFormat = reshade::api::format::unknown;
+        enhancedReadbackHasDepth = false;
+    }
+
+    bool ensureEnhancedReadbackResourcesLocked(reshade::api::effect_runtime* runtime,
+                                               const reshade::api::resource_desc& sourceDesc,
+                                               const reshade::api::resource_desc* depthDesc) {
+        reshade::api::device* const device = runtime->get_device();
+        const reshade::api::format format =
+            reshade::api::format_to_default_typed(sourceDesc.texture.format, 0);
+        const bool wantsDepth = Config::Manager::export_openexr;
+        const bool hasDepth = wantsDepth && depthDesc != nullptr &&
+            depthDesc->texture.width == sourceDesc.texture.width &&
+            depthDesc->texture.height == sourceDesc.texture.height &&
+            depthDesc->texture.samples == 1;
+        const reshade::api::format depthSourceFormat = hasDepth
+            ? depthDesc->texture.format
+            : reshade::api::format::unknown;
+        const reshade::api::format depthFormat = hasDepth
+            ? enhancedDepthReadbackPlaneFormat(depthSourceFormat)
+            : reshade::api::format::unknown;
+
+        if (wantsDepth && !hasDepth) {
+            if (!hasLoggedEnhancedMissingDepth.exchange(true)) {
+                LOG(LL_ERR, "Enhanced OpenEXR requires a full-resolution single-sample depth buffer, but none is active");
+            }
+            return false;
+        }
+        if (hasDepth && depthFormat == reshade::api::format::unknown) {
+            LOG(LL_ERR, "Enhanced OpenEXR depth format has no supported readback plane. sourceFormat=",
+                static_cast<uint32_t>(depthSourceFormat));
+            return false;
+        }
+
+        if (enhancedReadbackRuntime == runtime && enhancedReadbackDevice == device &&
+            enhancedReadbackWidth == sourceDesc.texture.width &&
+            enhancedReadbackHeight == sourceDesc.texture.height &&
+            enhancedReadbackFormat == format &&
+            enhancedReadbackHasDepth == hasDepth &&
+            enhancedReadbackDepthSourceFormat == depthSourceFormat &&
+            enhancedReadbackDepthFormat == depthFormat &&
+            enhancedReadbackSlots[0].resource.handle != 0) {
+            return true;
+        }
+
+        destroyEnhancedReadbackResourcesLocked();
+        enhancedReadbackRuntime = runtime;
+        enhancedReadbackDevice = device;
+        enhancedReadbackWidth = sourceDesc.texture.width;
+        enhancedReadbackHeight = sourceDesc.texture.height;
+        enhancedReadbackFormat = format;
+        enhancedReadbackDepthSourceFormat = depthSourceFormat;
+        enhancedReadbackDepthFormat = depthFormat;
+        enhancedReadbackHasDepth = hasDepth;
+
+        for (auto& slot : enhancedReadbackSlots) {
+            if (!device->create_resource(
+                    reshade::api::resource_desc(enhancedReadbackWidth, enhancedReadbackHeight, 1, 1,
+                        enhancedReadbackFormat, 1, reshade::api::memory_heap::gpu_to_cpu,
+                        reshade::api::resource_usage::copy_dest),
+                    nullptr, reshade::api::resource_usage::copy_dest, &slot.resource) ||
+                !device->create_fence(0, reshade::api::fence_flags::none, &slot.fence)) {
+                LOG(LL_ERR, "Failed to create Enhanced asynchronous readback ring");
+                destroyEnhancedReadbackResourcesLocked();
+                return false;
+            }
+            if (hasDepth && !device->create_resource(
+                    reshade::api::resource_desc(enhancedReadbackWidth, enhancedReadbackHeight, 1, 1,
+                        enhancedReadbackDepthFormat, 1, reshade::api::memory_heap::gpu_to_cpu,
+                        reshade::api::resource_usage::copy_dest),
+                    nullptr, reshade::api::resource_usage::copy_dest, &slot.depthResource)) {
+                LOG(LL_ERR, "Failed to create Enhanced asynchronous depth readback ring");
+                destroyEnhancedReadbackResourcesLocked();
+                return false;
+            }
+        }
+
+        LOG(LL_NFO, "Enhanced asynchronous D3D12 readback ring created. slots=",
+            kEnhancedReadbackSlotCount, " resolution=", enhancedReadbackWidth, "x", enhancedReadbackHeight,
+            " format=", static_cast<uint32_t>(enhancedReadbackFormat),
+            " depth=", enhancedReadbackHasDepth,
+            " depthSourceFormat=", static_cast<uint32_t>(enhancedReadbackDepthSourceFormat),
+            " depthPlaneFormat=", static_cast<uint32_t>(enhancedReadbackDepthFormat));
+        return true;
+    }
+
+    bool queueEnhancedReadbackLocked(reshade::api::effect_runtime* runtime,
+                                     reshade::api::resource source,
+                                     reshade::api::resource_usage sourceState,
+                                     reshade::api::resource depthSource,
+                                     reshade::api::resource_usage depthState,
+                                     uint64_t generation,
+                                     bool gpuMotionBlurOutput = false) {
+        for (size_t attempt = 0; attempt < kEnhancedReadbackSlotCount; ++attempt) {
+            const size_t index = (enhancedReadbackCursor + attempt) % kEnhancedReadbackSlotCount;
+            auto& slot = enhancedReadbackSlots[index];
+            if (slot.pending) continue;
+
+            reshade::api::command_queue* const queue = runtime->get_command_queue();
+            reshade::api::command_list* const commandList =
+                queue != nullptr ? queue->get_immediate_command_list() : nullptr;
+            if (queue == nullptr || commandList == nullptr) return false;
+
+            if (sourceState != reshade::api::resource_usage::copy_source)
+                commandList->barrier(source, sourceState, reshade::api::resource_usage::copy_source);
+            commandList->copy_texture_region(source, 0, nullptr, slot.resource, 0, nullptr);
+            if (sourceState != reshade::api::resource_usage::copy_source)
+                commandList->barrier(source, reshade::api::resource_usage::copy_source, sourceState);
+
+            if (enhancedReadbackHasDepth) {
+                if (depthSource.handle == 0 || slot.depthResource.handle == 0) {
+                    LOG(LL_ERR, "Enhanced depth readback ring lost its active depth resource");
+                    return false;
+                }
+                commandList->barrier(depthSource, depthState, reshade::api::resource_usage::copy_source);
+                commandList->copy_texture_region(depthSource, 0, nullptr, slot.depthResource, 0, nullptr);
+                commandList->barrier(depthSource, reshade::api::resource_usage::copy_source, depthState);
+            }
+
+            const uint64_t fenceValue = slot.fenceValue + 1;
+            if (!queue->signal(slot.fence, fenceValue)) {
+                LOG(LL_ERR, "Failed to signal Enhanced asynchronous readback fence");
+                return false;
+            }
+
+            slot.fenceValue = fenceValue;
+            slot.generation = generation;
+            slot.gpuMotionBlurOutput = gpuMotionBlurOutput;
+            slot.pending = true;
+            enhancedReadbackOrder.push_back(index);
+            enhancedReadbackCursor = (index + 1) % kEnhancedReadbackSlotCount;
+            return true;
+        }
+        return false;
+    }
+
+    bool consumeEnhancedReadbackLocked(std::vector<uint8_t>& pixels,
+                                       std::vector<float>& depth,
+                                       uint64_t& generation,
+                                       bool& gpuMotionBlurOutput) {
+        if (enhancedReadbackOrder.empty() || enhancedReadbackDevice == nullptr) return false;
+
+        const size_t index = enhancedReadbackOrder.front();
+        auto& slot = enhancedReadbackSlots[index];
+        if (!slot.pending ||
+            enhancedReadbackDevice->get_completed_fence_value(slot.fence) < slot.fenceValue) {
+            return false;
+        }
+
+        reshade::api::subresource_data mapped{};
+        bool copied = false;
+        if (enhancedReadbackDevice->map_texture_region(
+                slot.resource, 0, nullptr, reshade::api::map_access::read_only, &mapped)) {
+            copied = copyEnhancedMappedPixels(mapped, enhancedReadbackFormat,
+                                               enhancedReadbackWidth, enhancedReadbackHeight, pixels);
+            enhancedReadbackDevice->unmap_texture_region(slot.resource, 0);
+        }
+
+        bool copiedDepth = !enhancedReadbackHasDepth;
+        if (copied && enhancedReadbackHasDepth && slot.depthResource.handle != 0) {
+            reshade::api::subresource_data mappedDepth{};
+            if (enhancedReadbackDevice->map_texture_region(
+                    slot.depthResource, 0, nullptr, reshade::api::map_access::read_only, &mappedDepth)) {
+                copiedDepth = copyEnhancedMappedDepth(mappedDepth, enhancedReadbackDepthFormat,
+                                                      enhancedReadbackWidth, enhancedReadbackHeight, depth);
+                enhancedReadbackDevice->unmap_texture_region(slot.depthResource, 0);
+            }
+        } else if (!enhancedReadbackHasDepth) {
+            depth.clear();
+        }
+
+        generation = slot.generation;
+        gpuMotionBlurOutput = slot.gpuMotionBlurOutput;
+        slot.pending = false;
+        enhancedReadbackOrder.pop_front();
+        if (!copied || !copiedDepth) {
+            LOG(LL_ERR, "Failed to map or convert Enhanced asynchronous color/depth readback frame");
+        }
+        return copied && copiedDepth;
+    }
+
+    bool hasFreeEnhancedReadbackSlotLocked() {
+        return std::any_of(enhancedReadbackSlots.begin(), enhancedReadbackSlots.end(),
+                           [](const EnhancedReadbackSlot& slot) { return !slot.pending; });
+    }
+
+    HRESULT processEnhancedGpuMotionBlurOutput(const uint8_t* pixels,
+                                               uint32_t rowPitch,
+                                               uint32_t height) {
+        if (pixels == nullptr || rowPitch == 0 || height == 0 || encodingSession == nullptr)
+            return E_INVALIDARG;
+        if (enhancedPendingVideoFrames.load(std::memory_order_acquire) == 0)
+            return S_FALSE;
+
+        const HRESULT result = encodingSession->enqueueVideoFrame(pixels, rowPitch, height);
+        if (SUCCEEDED(result)) {
+            ++enhancedGpuMotionBlur.emittedFrames;
+            enhancedPendingVideoFrames.fetch_sub(1, std::memory_order_release);
+        }
+        return result;
+    }
+
+    bool processEnhancedGpuMotionBlurSubframeLocked(
+        reshade::api::effect_runtime* runtime,
+        reshade::api::resource source,
+        reshade::api::resource_usage sourceState,
+        uint64_t generation) {
+        if (runtime == nullptr || enhancedGpuMotionBlur.sourceCopy.handle == 0 ||
+            enhancedPendingVideoFrames.load(std::memory_order_acquire) == 0) {
+            return false;
+        }
+
+        const uint8_t sampleCount = Config::Manager::motion_blur_samples;
+        const float strength = std::clamp(Config::Manager::motion_blur_strength, 0.0f, 1.0f);
+        if (sampleCount == 0) return false;
+
+        const bool configurationChanged =
+            enhancedGpuMotionBlur.configuredSamples != sampleCount ||
+            enhancedGpuMotionBlur.configuredStrength != strength;
+        if (configurationChanged) {
+            enhancedGpuMotionBlur.subframeIndex = 0;
+            enhancedGpuMotionBlur.accumulatedSamples = 0;
+            enhancedGpuMotionBlur.configuredSamples = sampleCount;
+            enhancedGpuMotionBlur.configuredStrength = strength;
+            enhancedGpuMotionBlur.consumedSubframes = 0;
+            enhancedGpuMotionBlur.emittedFrames = 0;
+            LOG(LL_NFO, "Enhanced GPU multi-sample motion blur active. samples=",
+                static_cast<uint32_t>(sampleCount), " strength=", strength,
+                " groupSize=", static_cast<uint32_t>(sampleCount) + 1,
+                " resolution=", enhancedGpuMotionBlur.width, "x", enhancedGpuMotionBlur.height,
+                " readbacksPerOutputFrame=1");
+        }
+
+        const bool groupComplete = enhancedGpuMotionBlur.subframeIndex == sampleCount;
+        if (groupComplete && !hasFreeEnhancedReadbackSlotLocked()) return false;
+
+        auto* const queue = runtime->get_command_queue();
+        auto* const commandList = queue != nullptr ? queue->get_immediate_command_list() : nullptr;
+        if (queue == nullptr || commandList == nullptr) return false;
+
+        const float shutterPosition =
+            static_cast<float>(enhancedGpuMotionBlur.subframeIndex) / static_cast<float>(sampleCount);
+        const bool includeSample = shutterPosition >= (1.0f - strength);
+        if (includeSample) {
+            commandList->barrier(source, sourceState, reshade::api::resource_usage::copy_source);
+            commandList->barrier(enhancedGpuMotionBlur.sourceCopy,
+                                 reshade::api::resource_usage::shader_resource,
+                                 reshade::api::resource_usage::copy_dest);
+            commandList->copy_texture_region(source, 0, nullptr,
+                                             enhancedGpuMotionBlur.sourceCopy, 0, nullptr);
+            commandList->barrier(enhancedGpuMotionBlur.sourceCopy,
+                                 reshade::api::resource_usage::copy_dest,
+                                 reshade::api::resource_usage::shader_resource);
+            commandList->barrier(source, reshade::api::resource_usage::copy_source, sourceState);
+
+            commandList->barrier(enhancedGpuMotionBlur.accumulation,
+                                 reshade::api::resource_usage::shader_resource,
+                                 reshade::api::resource_usage::render_target);
+            if (enhancedGpuMotionBlur.accumulatedSamples == 0) {
+                constexpr float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                commandList->clear_render_target_view(
+                    enhancedGpuMotionBlur.accumulationRtv, clearColor);
+            }
+
+            const reshade::api::viewport viewport = {
+                0.0f, 0.0f, static_cast<float>(enhancedGpuMotionBlur.width),
+                static_cast<float>(enhancedGpuMotionBlur.height), 0.0f, 1.0f };
+            const reshade::api::rect scissor = {
+                0, 0, static_cast<int32_t>(enhancedGpuMotionBlur.width),
+                static_cast<int32_t>(enhancedGpuMotionBlur.height) };
+            commandList->bind_pipeline(reshade::api::pipeline_stage::all_graphics,
+                                       enhancedGpuMotionBlur.accumulatePipeline);
+            commandList->push_descriptors(
+                reshade::api::shader_stage::pixel, enhancedGpuMotionBlur.pipelineLayout, 0,
+                reshade::api::descriptor_table_update {
+                    {}, 0, 0, 1, reshade::api::descriptor_type::shader_resource_view,
+                    &enhancedGpuMotionBlur.sourceSrv });
+            commandList->bind_viewports(0, 1, &viewport);
+            commandList->bind_scissor_rects(0, 1, &scissor);
+            commandList->bind_render_targets_and_depth_stencil(
+                1, &enhancedGpuMotionBlur.accumulationRtv);
+            commandList->draw(4, 1, 0, 0);
+            commandList->barrier(enhancedGpuMotionBlur.accumulation,
+                                 reshade::api::resource_usage::render_target,
+                                 reshade::api::resource_usage::shader_resource);
+            ++enhancedGpuMotionBlur.accumulatedSamples;
+        }
+
+        if (groupComplete) {
+            if (enhancedGpuMotionBlur.accumulatedSamples == 0) {
+                LOG(LL_ERR, "Enhanced GPU motion-blur group has no accumulated samples");
+                return false;
+            }
+
+            const float divideValues[4] = {
+                static_cast<float>(enhancedGpuMotionBlur.accumulatedSamples), 0.0f, 0.0f, 0.0f };
+            const reshade::api::viewport viewport = {
+                0.0f, 0.0f, static_cast<float>(enhancedGpuMotionBlur.width),
+                static_cast<float>(enhancedGpuMotionBlur.height), 0.0f, 1.0f };
+            const reshade::api::rect scissor = {
+                0, 0, static_cast<int32_t>(enhancedGpuMotionBlur.width),
+                static_cast<int32_t>(enhancedGpuMotionBlur.height) };
+            commandList->barrier(enhancedGpuMotionBlur.finalOutput,
+                                 reshade::api::resource_usage::copy_source,
+                                 reshade::api::resource_usage::render_target);
+            commandList->bind_pipeline(reshade::api::pipeline_stage::all_graphics,
+                                       enhancedGpuMotionBlur.dividePipeline);
+            commandList->push_descriptors(
+                reshade::api::shader_stage::pixel, enhancedGpuMotionBlur.pipelineLayout, 0,
+                reshade::api::descriptor_table_update {
+                    {}, 0, 0, 1, reshade::api::descriptor_type::shader_resource_view,
+                    &enhancedGpuMotionBlur.accumulationSrv });
+            commandList->push_constants(reshade::api::shader_stage::pixel,
+                                        enhancedGpuMotionBlur.pipelineLayout, 1, 0, 4, divideValues);
+            commandList->bind_viewports(0, 1, &viewport);
+            commandList->bind_scissor_rects(0, 1, &scissor);
+            commandList->bind_render_targets_and_depth_stencil(1, &enhancedGpuMotionBlur.finalRtv);
+            commandList->draw(4, 1, 0, 0);
+            commandList->barrier(enhancedGpuMotionBlur.finalOutput,
+                                 reshade::api::resource_usage::render_target,
+                                 reshade::api::resource_usage::copy_source);
+
+            if (!queueEnhancedReadbackLocked(
+                    runtime, enhancedGpuMotionBlur.finalOutput,
+                    reshade::api::resource_usage::copy_source, {},
+                    reshade::api::resource_usage::undefined, generation, true)) {
+                LOG(LL_ERR, "Failed to queue Enhanced GPU motion-blur output readback");
+                return false;
+            }
+
+            enhancedGpuMotionBlur.subframeIndex = 0;
+            enhancedGpuMotionBlur.accumulatedSamples = 0;
+        } else {
+            ++enhancedGpuMotionBlur.subframeIndex;
+            enhancedPendingVideoFrames.fetch_sub(1, std::memory_order_release);
+        }
+
+        ++enhancedGpuMotionBlur.consumedSubframes;
+        return true;
+    }
+
+    HRESULT processEnhancedCapturedVideoSample(const uint8_t* pixels, uint32_t rowPitch, uint32_t height,
+                                               const float* depth, uint32_t depthRowPitch) {
+        if (pixels == nullptr || rowPitch == 0 || height == 0 || encodingSession == nullptr) {
+            return E_INVALIDARG;
+        }
+        if (enhancedPendingVideoFrames.load(std::memory_order_acquire) == 0) {
+            return S_FALSE;
+        }
+
+        const uint8_t sampleCount = Config::Manager::motion_blur_samples;
+        const bool useMotionBlur = isCustomFrameRateSupported && sampleCount != 0;
+        if (!useMotionBlur) {
+            const HRESULT enqueueHr = encodingSession->enqueueVideoFrame(pixels, rowPitch, height);
+            if (SUCCEEDED(enqueueHr)) {
+                enhancedPendingVideoFrames.fetch_sub(1, std::memory_order_release);
+                if (Config::Manager::export_openexr) {
+                    if (depth == nullptr || depthRowPitch == 0) {
+                        LOG(LL_ERR, "Enhanced OpenEXR frame is missing its synchronized depth plane");
+                        return E_FAIL;
+                    }
+                    return encodingSession->enqueueExrImage(pixels, rowPitch, depth, depthRowPitch);
+                }
+            }
+            return enqueueHr;
+        }
+
+        const float strength = std::clamp(Config::Manager::motion_blur_strength, 0.0f, 1.0f);
+        const size_t frameBytes = static_cast<size_t>(rowPitch) * height;
+        const bool configurationChanged =
+            enhancedMotionBlur.rowPitch != rowPitch ||
+            enhancedMotionBlur.height != height ||
+            enhancedMotionBlur.configuredSamples != sampleCount ||
+            enhancedMotionBlur.configuredStrength != strength;
+        if (configurationChanged) {
+            enhancedMotionBlur = {};
+            enhancedMotionBlur.rowPitch = rowPitch;
+            enhancedMotionBlur.height = height;
+            enhancedMotionBlur.configuredSamples = sampleCount;
+            enhancedMotionBlur.configuredStrength = strength;
+            enhancedMotionBlur.accumulation.assign(frameBytes, 0);
+            enhancedMotionBlur.output.resize(frameBytes);
+            LOG(LL_NFO, "Enhanced multi-sample motion blur active. samples=", static_cast<uint32_t>(sampleCount),
+                " strength=", strength, " groupSize=", static_cast<uint32_t>(sampleCount) + 1,
+                " resolution=", rowPitch / 4, "x", height);
+        }
+
+        const float shutterPosition =
+            static_cast<float>(enhancedMotionBlur.subframeIndex) / static_cast<float>(sampleCount);
+        if (shutterPosition >= (1.0f - strength)) {
+            parallelForMotionBlurBytes(frameBytes, [&](const size_t begin, const size_t end) {
+                for (size_t i = begin; i < end; ++i) {
+                    enhancedMotionBlur.accumulation[i] = static_cast<uint16_t>(
+                        enhancedMotionBlur.accumulation[i] + pixels[i]);
+                }
+            });
+            ++enhancedMotionBlur.accumulatedSamples;
+        }
+
+        HRESULT result = S_OK;
+        const bool groupComplete = enhancedMotionBlur.subframeIndex == sampleCount;
+        if (groupComplete) {
+            if (enhancedMotionBlur.accumulatedSamples == 0) {
+                LOG(LL_ERR, "Enhanced motion blur group completed without an accumulated sample");
+                return E_UNEXPECTED;
+            }
+
+            const uint32_t divisor = enhancedMotionBlur.accumulatedSamples;
+            parallelForMotionBlurBytes(frameBytes, [&](const size_t begin, const size_t end) {
+                for (size_t i = begin; i < end; ++i) {
+                    enhancedMotionBlur.output[i] = static_cast<uint8_t>(
+                        (static_cast<uint32_t>(enhancedMotionBlur.accumulation[i]) + divisor / 2) / divisor);
+                    enhancedMotionBlur.accumulation[i] = 0;
+                }
+            });
+            result = encodingSession->enqueueVideoFrame(enhancedMotionBlur.output.data(), rowPitch, height);
+            if (FAILED(result)) return result;
+
+            if (Config::Manager::export_openexr) {
+                if (depth == nullptr || depthRowPitch == 0) {
+                    LOG(LL_ERR, "Enhanced motion-blur EXR frame is missing its synchronized depth plane");
+                    return E_FAIL;
+                }
+                result = encodingSession->enqueueExrImage(
+                    enhancedMotionBlur.output.data(), rowPitch, depth, depthRowPitch);
+                if (FAILED(result)) return result;
+            }
+
+            ++enhancedMotionBlur.emittedFrames;
+            enhancedMotionBlur.subframeIndex = 0;
+            enhancedMotionBlur.accumulatedSamples = 0;
+        } else {
+            ++enhancedMotionBlur.subframeIndex;
+        }
+
+        ++enhancedMotionBlur.consumedSubframes;
+        enhancedPendingVideoFrames.fetch_sub(1, std::memory_order_release);
+        return result;
+    }
+
+    HRESULT drainEnhancedReadbacksForFinalize() {
+        std::lock_guard<std::mutex> readbackLock(enhancedReadbackMutex);
+        if (enhancedReadbackDevice == nullptr || enhancedReadbackOrder.empty()) {
+            return enhancedPendingVideoFrames.load(std::memory_order_acquire) == 0 ? S_OK : E_FAIL;
+        }
+
+        const uint64_t activeGeneration = enhancedCaptureGeneration.load(std::memory_order_acquire);
+        const uint32_t width = enhancedReadbackWidth;
+        const uint32_t height = enhancedReadbackHeight;
+        const size_t rowPitch = static_cast<size_t>(width) * 4;
+        size_t drainedFrames = 0;
+
+        while (!enhancedReadbackOrder.empty()) {
+            const auto& front = enhancedReadbackSlots[enhancedReadbackOrder.front()];
+            if (!enhancedReadbackDevice->wait(front.fence, front.fenceValue, 2'000'000'000ULL)) {
+                LOG(LL_ERR, "Timed out draining Enhanced D3D12 readback during finalization");
+                break;
+            }
+
+            uint64_t completedGeneration = 0;
+            bool gpuMotionBlurOutput = false;
+            if (!consumeEnhancedReadbackLocked(
+                    reshadeCapturePixels, enhancedCaptureDepth, completedGeneration,
+                    gpuMotionBlurOutput)) break;
+            if (completedGeneration != activeGeneration ||
+                enhancedPendingVideoFrames.load(std::memory_order_acquire) == 0) continue;
+
+            const HRESULT enqueueHr = gpuMotionBlurOutput
+                ? processEnhancedGpuMotionBlurOutput(
+                    reshadeCapturePixels.data(), static_cast<uint32_t>(rowPitch), height)
+                : processEnhancedCapturedVideoSample(
+                    reshadeCapturePixels.data(), static_cast<uint32_t>(rowPitch), height,
+                    enhancedCaptureDepth.empty() ? nullptr : enhancedCaptureDepth.data(),
+                    enhancedCaptureDepth.empty() ? 0u : width * static_cast<uint32_t>(sizeof(float)));
+            if (FAILED(enqueueHr)) return enqueueHr;
+            ++drainedFrames;
+        }
+
+        const uint32_t remaining = enhancedPendingVideoFrames.load(std::memory_order_acquire);
+        LOG(remaining == 0 ? LL_NFO : LL_ERR,
+            "Enhanced final readback drain complete. drainedFrames=", drainedFrames,
+            " remainingVideoSamples=", remaining);
+        if (enhancedMotionBlur.configuredSamples != 0) {
+            LOG(remaining == 0 && enhancedMotionBlur.subframeIndex == 0 ? LL_NFO : LL_WRN,
+                "Enhanced motion blur summary. consumedSubframes=", enhancedMotionBlur.consumedSubframes,
+                " emittedFrames=", enhancedMotionBlur.emittedFrames,
+                " groupSize=", static_cast<uint32_t>(enhancedMotionBlur.configuredSamples) + 1,
+                " partialGroupSubframes=", enhancedMotionBlur.subframeIndex,
+                " currentGroupAccumulatedSamples=", enhancedMotionBlur.accumulatedSamples);
+        }
+        if (enhancedGpuMotionBlur.configuredSamples != 0) {
+            LOG(remaining == 0 && enhancedGpuMotionBlur.subframeIndex == 0 ? LL_NFO : LL_WRN,
+                "Enhanced GPU motion blur summary. consumedSubframes=",
+                enhancedGpuMotionBlur.consumedSubframes,
+                " emittedFrames=", enhancedGpuMotionBlur.emittedFrames,
+                " groupSize=", static_cast<uint32_t>(enhancedGpuMotionBlur.configuredSamples) + 1,
+                " partialGroupSubframes=", enhancedGpuMotionBlur.subframeIndex,
+                " currentGroupAccumulatedSamples=", enhancedGpuMotionBlur.accumulatedSamples);
+        }
+        return remaining == 0 ? S_OK : E_FAIL;
+    }
+
+    bool captureEnhancedResource(reshade::api::effect_runtime* runtime,
+                                 reshade::api::resource source,
+                                 reshade::api::resource_usage sourceState,
+                                 std::vector<uint8_t>& pixels,
+                                 uint32_t& width,
+                                 uint32_t& height) {
+        reshade::api::device* const device = runtime->get_device();
+        const reshade::api::resource_desc desc = device->get_resource_desc(source);
+        const reshade::api::format viewFormat =
+            reshade::api::format_to_default_typed(desc.texture.format, 0);
+
+        switch (viewFormat) {
+        case reshade::api::format::r8g8b8a8_unorm:
+        case reshade::api::format::r8g8b8x8_unorm:
+        case reshade::api::format::b8g8r8a8_unorm:
+        case reshade::api::format::b8g8r8x8_unorm:
+        case reshade::api::format::r10g10b10a2_unorm:
+        case reshade::api::format::b10g10r10a2_unorm:
+            break;
+        default:
+            LOG(LL_ERR, "Enhanced VideoEncode resource uses an unsupported capture format: ",
+                static_cast<uint32_t>(desc.texture.format));
+            return false;
+        }
+
+        width = desc.texture.width;
+        height = desc.texture.height;
+        if (width == 0 || height == 0) return false;
+
+        reshade::api::resource readback{};
+        if (!device->create_resource(
+                reshade::api::resource_desc(width, height, 1, 1, viewFormat, 1,
+                    reshade::api::memory_heap::gpu_to_cpu,
+                    reshade::api::resource_usage::copy_dest),
+                nullptr, reshade::api::resource_usage::copy_dest, &readback)) {
+            LOG(LL_ERR, "Failed to create Enhanced VideoEncode readback resource");
+            return false;
+        }
+
+        bool succeeded = false;
+        reshade::api::command_queue* const queue = runtime->get_command_queue();
+        reshade::api::command_list* const commandList = queue->get_immediate_command_list();
+        const reshade::api::resource_usage effectiveState =
+            sourceState == reshade::api::resource_usage::undefined
+                ? reshade::api::resource_usage::render_target
+                : sourceState;
+
+        if (effectiveState != reshade::api::resource_usage::copy_source)
+            commandList->barrier(source, effectiveState, reshade::api::resource_usage::copy_source);
+        commandList->copy_texture_region(source, 0, nullptr, readback, 0, nullptr);
+        if (effectiveState != reshade::api::resource_usage::copy_source)
+            commandList->barrier(source, reshade::api::resource_usage::copy_source, effectiveState);
+
+        reshade::api::fence copyFence{};
+        const bool fenceCreated = device->create_fence(0, reshade::api::fence_flags::none, &copyFence);
+        if (!fenceCreated || !queue->signal(copyFence, 1) || !device->wait(copyFence, 1))
+            queue->wait_idle();
+        if (fenceCreated) device->destroy_fence(copyFence);
+
+        reshade::api::subresource_data mapped{};
+        if (device->map_texture_region(readback, 0, nullptr,
+                reshade::api::map_access::read_only, &mapped)) {
+            const size_t outputRowPitch = static_cast<size_t>(width) * 4;
+            pixels.resize(outputRowPitch * static_cast<size_t>(height));
+            auto* destination = pixels.data();
+            auto* sourcePixels = static_cast<const uint8_t*>(mapped.data);
+
+            for (uint32_t y = 0; y < height; ++y,
+                 destination += outputRowPitch, sourcePixels += mapped.row_pitch) {
+                switch (viewFormat) {
+                case reshade::api::format::r8g8b8a8_unorm:
+                case reshade::api::format::r8g8b8x8_unorm:
+                    std::memcpy(destination, sourcePixels, outputRowPitch);
+                    if (viewFormat == reshade::api::format::r8g8b8x8_unorm)
+                        for (size_t x = 3; x < outputRowPitch; x += 4) destination[x] = 0xFF;
+                    break;
+                case reshade::api::format::b8g8r8a8_unorm:
+                case reshade::api::format::b8g8r8x8_unorm:
+                    std::memcpy(destination, sourcePixels, outputRowPitch);
+                    for (size_t x = 0; x < outputRowPitch; x += 4) {
+                        std::swap(destination[x], destination[x + 2]);
+                        if (viewFormat == reshade::api::format::b8g8r8x8_unorm) destination[x + 3] = 0xFF;
+                    }
+                    break;
+                case reshade::api::format::r10g10b10a2_unorm:
+                case reshade::api::format::b10g10r10a2_unorm:
+                    for (uint32_t x = 0; x < width; ++x) {
+                        const uint32_t packed = reinterpret_cast<const uint32_t*>(sourcePixels)[x];
+                        destination[x * 4 + 0] = static_cast<uint8_t>((packed & 0x3FF) >> 2);
+                        destination[x * 4 + 1] = static_cast<uint8_t>(((packed >> 10) & 0x3FF) >> 2);
+                        destination[x * 4 + 2] = static_cast<uint8_t>(((packed >> 20) & 0x3FF) >> 2);
+                        destination[x * 4 + 3] = static_cast<uint8_t>(((packed >> 30) & 0x3) * 85);
+                        if (viewFormat == reshade::api::format::b10g10r10a2_unorm)
+                            std::swap(destination[x * 4], destination[x * 4 + 2]);
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            device->unmap_texture_region(readback, 0);
+            succeeded = true;
+        }
+
+        device->destroy_resource(readback);
+        return succeeded;
     }
 
     bool ensureD3D11Hook(bool allowLoadLibrary = true) {
@@ -1413,6 +2948,453 @@ void ever::OnPresent(IDXGISwapChain* p_swap_chain) {
             LOG(LL_NFO, "BUFFER COUNT: ", desc.BufferCount);
         } catch (std::exception& ex) {
             LOG(LL_ERR, ex.what());
+        }
+    }
+}
+
+bool ever::isEnhancedEdition() {
+    return g_isEnhancedEdition;
+}
+
+bool ever::isCustomFrameRateAvailable() {
+    return isCustomFrameRateSupported;
+}
+
+bool ever::isDualPassAvailable() {
+    return !g_isEnhancedEdition || isEnhancedDualPassSupported;
+}
+
+void ever::OnReshadeInitRuntime(reshade::api::effect_runtime* runtime) {
+    if (!g_isEnhancedEdition || runtime == nullptr || runtime->get_device() == nullptr ||
+        runtime->get_device()->get_api() != reshade::api::device_api::d3d12) return;
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    runtime->get_screenshot_width_and_height(&width, &height);
+    if (width == 0 || height == 0) return;
+
+    {
+        std::lock_guard<std::mutex> diagnosticLock(enhancedDiagnosticMutex);
+        const uint32_t backBufferCount = runtime->get_back_buffer_count();
+        for (uint32_t index = 0; index < backBufferCount; ++index) {
+            const reshade::api::resource backBuffer = runtime->get_back_buffer(index);
+            if (backBuffer.handle != 0) enhancedBackBufferHandles.insert(backBuffer.handle);
+        }
+    }
+
+    const uint64_t currentArea = static_cast<uint64_t>(enhancedRuntimeWidth.load(std::memory_order_relaxed)) *
+                                 enhancedRuntimeHeight.load(std::memory_order_relaxed);
+    const uint64_t candidateArea = static_cast<uint64_t>(width) * height;
+    if (candidateArea >= currentArea || enhancedRuntimeSource.load(std::memory_order_relaxed) == runtime) {
+        enhancedRuntimeWidth.store(width, std::memory_order_relaxed);
+        enhancedRuntimeHeight.store(height, std::memory_order_relaxed);
+        enhancedRuntimeSource.store(runtime, std::memory_order_relaxed);
+    }
+}
+
+void ever::OnReshadeDestroyRuntime(reshade::api::effect_runtime* runtime) {
+    if (!g_isEnhancedEdition || runtime == nullptr) return;
+
+    {
+        std::lock_guard<std::mutex> diagnosticLock(enhancedDiagnosticMutex);
+        const uint32_t backBufferCount = runtime->get_back_buffer_count();
+        for (uint32_t index = 0; index < backBufferCount; ++index) {
+            enhancedBackBufferHandles.erase(runtime->get_back_buffer(index).handle);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> readbackLock(enhancedReadbackMutex);
+        if (enhancedReadbackRuntime == runtime) destroyEnhancedReadbackResourcesLocked();
+        if (enhancedGpuMotionBlur.runtime == runtime) destroyEnhancedGpuMotionBlurResourcesLocked();
+    }
+
+    if (enhancedRuntimeSource.load(std::memory_order_relaxed) == runtime) {
+        enhancedRuntimeSource.store(nullptr, std::memory_order_relaxed);
+        // Keep the last valid dimensions across ReShade's ResizeBuffers reset. The Enhanced
+        // export creates its Media Foundation sink while the same runtime is being recreated,
+        // so clearing these here makes the first export attempt fail spuriously.
+    }
+}
+
+void ever::OnReshadeRenderTarget(reshade::api::device* device, reshade::api::resource_view view) {
+    if (!g_isEnhancedEdition || device == nullptr || view.handle == 0 ||
+        enhancedExpectedWidth.load(std::memory_order_relaxed) == 0) return;
+    const reshade::api::resource resource = device->get_resource_from_view(view);
+    tryTrackEnhancedVideoResource(device, resource, reshade::api::resource_usage::render_target);
+
+    const reshade::api::resource_desc desc = device->get_resource_desc(resource);
+    if (desc.texture.width != enhancedExpectedWidth.load(std::memory_order_relaxed) ||
+        desc.texture.height != enhancedExpectedHeight.load(std::memory_order_relaxed)) return;
+
+    bool shouldLog = false;
+    bool isBackBuffer = false;
+    {
+        std::lock_guard<std::mutex> diagnosticLock(enhancedDiagnosticMutex);
+        shouldLog = enhancedLoggedRenderTargetHandles.insert(resource.handle).second;
+        isBackBuffer = enhancedBackBufferHandles.contains(resource.handle);
+    }
+
+    const reshade::api::format typedFormat =
+        reshade::api::format_to_default_typed(desc.texture.format, 0);
+    const bool isCleanColorCandidate = !isBackBuffer &&
+        (typedFormat == reshade::api::format::r8g8b8a8_unorm ||
+         typedFormat == reshade::api::format::r8g8b8x8_unorm ||
+         typedFormat == reshade::api::format::b8g8r8a8_unorm ||
+         typedFormat == reshade::api::format::b8g8r8x8_unorm);
+    if (isCleanColorCandidate) {
+        std::lock_guard<std::mutex> resourceLock(enhancedResourceMutex);
+        enhancedCleanCandidateDevice = device;
+        enhancedCleanCandidateResource = resource;
+        enhancedCleanCandidateState = reshade::api::resource_usage::render_target;
+    }
+
+    if (shouldLog) {
+        const std::string name = getD3D12ResourceDebugName(device, resource);
+        LOG(LL_NFO, "Enhanced full-resolution render-target candidate. handle=",
+            Logger::hex(resource.handle, 16), " backBuffer=", isBackBuffer,
+            " format=", static_cast<uint32_t>(desc.texture.format),
+            " name=", name.empty() ? "<unnamed>" : name);
+    }
+}
+
+void ever::OnReshadeDepthStencil(reshade::api::device* device, reshade::api::resource_view view) {
+    if (!g_isEnhancedEdition || device == nullptr || view.handle == 0 ||
+        enhancedExpectedWidth.load(std::memory_order_relaxed) == 0) return;
+
+    const reshade::api::resource resource = device->get_resource_from_view(view);
+    if (resource.handle == 0) return;
+    const reshade::api::resource_desc desc = device->get_resource_desc(resource);
+    if (desc.texture.width != enhancedExpectedWidth.load(std::memory_order_relaxed) ||
+        desc.texture.height != enhancedExpectedHeight.load(std::memory_order_relaxed)) return;
+
+    const reshade::api::format depthFormat =
+        reshade::api::format_to_depth_stencil_typed(desc.texture.format);
+    const bool supportedDepthFormat =
+        depthFormat == reshade::api::format::d16_unorm ||
+        depthFormat == reshade::api::format::d24_unorm_s8_uint ||
+        depthFormat == reshade::api::format::d32_float ||
+        depthFormat == reshade::api::format::d32_float_s8_uint;
+    if (!supportedDepthFormat) return;
+
+    {
+        std::lock_guard<std::mutex> resourceLock(enhancedResourceMutex);
+        enhancedDepthCandidateDevice = device;
+        enhancedDepthCandidateResource = resource;
+        enhancedDepthCandidateState = reshade::api::resource_usage::depth_stencil_write;
+    }
+
+    bool shouldLog = false;
+    {
+        std::lock_guard<std::mutex> diagnosticLock(enhancedDiagnosticMutex);
+        shouldLog = enhancedLoggedDepthStencilHandles.insert(resource.handle).second;
+    }
+    if (shouldLog) {
+        const std::string name = getD3D12ResourceDebugName(device, resource);
+        LOG(LL_NFO, "Enhanced full-resolution depth-stencil candidate. handle=",
+            Logger::hex(resource.handle, 16),
+            " format=", static_cast<uint32_t>(desc.texture.format),
+            " typedDepthFormat=", static_cast<uint32_t>(depthFormat),
+            " samples=", desc.texture.samples,
+            " name=", name.empty() ? "<unnamed>" : name);
+    }
+}
+
+void ever::OnReshadeBarrier(reshade::api::device* device, uint32_t count,
+                            const reshade::api::resource* resources,
+                            const reshade::api::resource_usage* newStates) {
+    if (!g_isEnhancedEdition || device == nullptr || resources == nullptr || newStates == nullptr ||
+        enhancedExpectedWidth.load(std::memory_order_relaxed) == 0) return;
+    std::lock_guard<std::mutex> resourceLock(enhancedResourceMutex);
+    for (uint32_t index = 0; index < count; ++index) {
+        if (resources[index].handle == enhancedVideoEncodeResource.handle) {
+            enhancedVideoEncodeState = newStates[index];
+        }
+        if (device == enhancedCleanCandidateDevice &&
+            resources[index].handle == enhancedCleanCandidateResource.handle) {
+            enhancedCleanCandidateState = newStates[index];
+        }
+        if (device == enhancedDepthCandidateDevice &&
+            resources[index].handle == enhancedDepthCandidateResource.handle) {
+            enhancedDepthCandidateState = newStates[index];
+        }
+    }
+}
+
+void ever::OnReshadeCopyResource(reshade::api::device* device,
+                                 reshade::api::resource source,
+                                 reshade::api::resource destination,
+                                 const char* operation) {
+    if (!g_isEnhancedEdition || device == nullptr || source.handle == 0 || destination.handle == 0 ||
+        enhancedExpectedWidth.load(std::memory_order_relaxed) == 0) return;
+
+    bool destinationIsBackBuffer = false;
+    bool shouldLog = false;
+    {
+        std::lock_guard<std::mutex> diagnosticLock(enhancedDiagnosticMutex);
+        destinationIsBackBuffer = enhancedBackBufferHandles.contains(destination.handle);
+        if (destinationIsBackBuffer)
+            shouldLog = enhancedLoggedCopySourceHandles.insert(source.handle).second;
+    }
+    if (!destinationIsBackBuffer || !shouldLog) return;
+
+    const reshade::api::resource_desc sourceDesc = device->get_resource_desc(source);
+    const reshade::api::resource_desc destinationDesc = device->get_resource_desc(destination);
+    const std::string sourceName = getD3D12ResourceDebugName(device, source);
+    LOG(LL_NFO, "Enhanced copy into swap-chain candidate. operation=", operation,
+        " source=", Logger::hex(source.handle, 16),
+        " sourceResolution=", sourceDesc.texture.width, "x", sourceDesc.texture.height,
+        " sourceFormat=", static_cast<uint32_t>(sourceDesc.texture.format),
+        " sourceName=", sourceName.empty() ? "<unnamed>" : sourceName,
+        " destination=", Logger::hex(destination.handle, 16),
+        " destinationResolution=", destinationDesc.texture.width, "x", destinationDesc.texture.height);
+}
+
+void ever::OnReshadeDestroyResource(reshade::api::resource resource) {
+    if (!g_isEnhancedEdition || resource.handle == 0) return;
+    {
+        std::lock_guard<std::mutex> resourceLock(enhancedResourceMutex);
+        if (resource.handle == enhancedVideoEncodeResource.handle) {
+            LOG(LL_DBG, "Enhanced VideoEncode resource destroyed");
+            enhancedVideoEncodeResource = {};
+            enhancedVideoEncodeState = reshade::api::resource_usage::undefined;
+            enhancedVideoResourceTracked.store(false, std::memory_order_release);
+        }
+        if (resource.handle == enhancedCleanCandidateResource.handle) {
+            LOG(LL_DBG, "Enhanced clean color candidate destroyed");
+            enhancedCleanCandidateDevice = nullptr;
+            enhancedCleanCandidateResource = {};
+            enhancedCleanCandidateState = reshade::api::resource_usage::undefined;
+        }
+        if (resource.handle == enhancedDepthCandidateResource.handle) {
+            LOG(LL_DBG, "Enhanced depth candidate destroyed");
+            enhancedDepthCandidateDevice = nullptr;
+            enhancedDepthCandidateResource = {};
+            enhancedDepthCandidateState = reshade::api::resource_usage::undefined;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> diagnosticLock(enhancedDiagnosticMutex);
+        enhancedLoggedRenderTargetHandles.erase(resource.handle);
+        enhancedLoggedDepthStencilHandles.erase(resource.handle);
+        enhancedLoggedCopySourceHandles.erase(resource.handle);
+    }
+}
+
+void ever::OnReshadeBeginEffects(reshade::api::effect_runtime* runtime,
+                                 reshade::api::command_list* commandList,
+                                 reshade::api::resource_view targetView) {
+    enhancedPostEffectsCaptureReady.store(false, std::memory_order_release);
+    if (!g_isEnhancedEdition || runtime == nullptr || commandList == nullptr || targetView.handle == 0 ||
+        enhancedExpectedWidth.load(std::memory_order_relaxed) == 0) return;
+
+    std::lock_guard<std::mutex> sessionLock(mxSession);
+    if (encodingSession == nullptr || !encodingSession->isCapturing) return;
+
+    reshade::api::device* const device = commandList->get_device();
+    if (device == nullptr || device != runtime->get_device() ||
+        device->get_api() != reshade::api::device_api::d3d12) return;
+
+    const reshade::api::resource target = device->get_resource_from_view(targetView);
+    if (target.handle == 0) return;
+
+    reshade::api::resource cleanSource{};
+    reshade::api::resource_usage cleanState = reshade::api::resource_usage::undefined;
+    {
+        std::lock_guard<std::mutex> resourceLock(enhancedResourceMutex);
+        if (enhancedCleanCandidateDevice != device || enhancedCleanCandidateResource.handle == 0) return;
+        cleanSource = enhancedCleanCandidateResource;
+        cleanState = enhancedCleanCandidateState;
+    }
+    if (cleanSource.handle == target.handle) return;
+
+    const reshade::api::resource_desc sourceDesc = device->get_resource_desc(cleanSource);
+    const reshade::api::resource_desc targetDesc = device->get_resource_desc(target);
+    if (sourceDesc.texture.width != targetDesc.texture.width ||
+        sourceDesc.texture.height != targetDesc.texture.height ||
+        reshade::api::format_to_typeless(sourceDesc.texture.format) !=
+            reshade::api::format_to_typeless(targetDesc.texture.format)) {
+        return;
+    }
+
+    if (cleanState == reshade::api::resource_usage::undefined)
+        cleanState = reshade::api::resource_usage::render_target;
+    if (cleanState != reshade::api::resource_usage::copy_source)
+        commandList->barrier(cleanSource, cleanState, reshade::api::resource_usage::copy_source);
+    commandList->barrier(target, reshade::api::resource_usage::render_target,
+                         reshade::api::resource_usage::copy_dest);
+    commandList->copy_texture_region(cleanSource, 0, nullptr, target, 0, nullptr);
+    commandList->barrier(target, reshade::api::resource_usage::copy_dest,
+                         reshade::api::resource_usage::render_target);
+    if (cleanState != reshade::api::resource_usage::copy_source)
+        commandList->barrier(cleanSource, reshade::api::resource_usage::copy_source, cleanState);
+
+    enhancedPostEffectsBackBufferHandle.store(target.handle, std::memory_order_release);
+    enhancedPostEffectsCaptureReady.store(true, std::memory_order_release);
+    if (!hasLoggedEnhancedPreEffectsReplacement.exchange(true)) {
+        LOG(LL_NFO, "Enhanced clean pre-UI image copied into the ReShade effect target. source=",
+            Logger::hex(cleanSource.handle, 16), " target=", Logger::hex(target.handle, 16),
+            " resolution=", sourceDesc.texture.width, "x", sourceDesc.texture.height,
+            " effectsEnabled=", runtime->get_effects_state());
+    }
+}
+
+void ever::OnReshadePresent(reshade::api::effect_runtime* runtime) {
+    if (!g_isEnhancedEdition || runtime == nullptr) return;
+
+    if (enhancedExpectedWidth.load(std::memory_order_relaxed) == 0) {
+        uint32_t currentRuntimeWidth = 0;
+        uint32_t currentRuntimeHeight = 0;
+        runtime->get_screenshot_width_and_height(&currentRuntimeWidth, &currentRuntimeHeight);
+        const uint64_t currentArea = static_cast<uint64_t>(enhancedRuntimeWidth.load(std::memory_order_relaxed)) *
+                                     enhancedRuntimeHeight.load(std::memory_order_relaxed);
+        const uint64_t candidateArea = static_cast<uint64_t>(currentRuntimeWidth) * currentRuntimeHeight;
+        if (currentRuntimeWidth != 0 && currentRuntimeHeight != 0 && candidateArea >= currentArea) {
+            enhancedRuntimeWidth.store(currentRuntimeWidth, std::memory_order_relaxed);
+            enhancedRuntimeHeight.store(currentRuntimeHeight, std::memory_order_relaxed);
+            enhancedRuntimeSource.store(runtime, std::memory_order_relaxed);
+        }
+    }
+
+    std::lock_guard<std::mutex> captureLock(reshadeCaptureMutex);
+    std::lock_guard<std::mutex> sessionLock(mxSession);
+    if (encodingSession == nullptr || !encodingSession->isCapturing) return;
+
+    const uint32_t expectedWidth = encodingSession->width();
+    const uint32_t expectedHeight = encodingSession->height();
+    reshade::api::device* const device = runtime->get_device();
+    reshade::api::resource source = runtime->get_current_back_buffer();
+    if (source.handle == 0 || device == nullptr) return;
+    reshade::api::resource_desc sourceDesc = device->get_resource_desc(source);
+    reshade::api::resource_usage sourceState = reshade::api::resource_usage::present;
+    bool usesCleanCandidate = false;
+    const bool usesPostEffectsCleanBackBuffer =
+        enhancedPostEffectsCaptureReady.exchange(false, std::memory_order_acq_rel) &&
+        enhancedPostEffectsBackBufferHandle.load(std::memory_order_acquire) == source.handle;
+    const uint32_t width = sourceDesc.texture.width;
+    const uint32_t height = sourceDesc.texture.height;
+    if (!hasLoggedEnhancedBackBuffer.exchange(true)) {
+        const std::string name = getD3D12ResourceDebugName(device, source);
+        LOG(LL_NFO, "Enhanced active swap-chain back buffer. handle=", Logger::hex(source.handle, 16),
+            " resolution=", width, "x", height,
+            " format=", static_cast<uint32_t>(sourceDesc.texture.format),
+            " name=", name.empty() ? "<unnamed>" : name);
+    }
+
+    if (!usesPostEffectsCleanBackBuffer) {
+        std::lock_guard<std::mutex> resourceLock(enhancedResourceMutex);
+        if (enhancedCleanCandidateDevice == device && enhancedCleanCandidateResource.handle != 0) {
+            const reshade::api::resource_desc candidateDesc =
+                device->get_resource_desc(enhancedCleanCandidateResource);
+            const reshade::api::format candidateFormat =
+                reshade::api::format_to_default_typed(candidateDesc.texture.format, 0);
+            const bool supportedColorFormat =
+                candidateFormat == reshade::api::format::r8g8b8a8_unorm ||
+                candidateFormat == reshade::api::format::r8g8b8x8_unorm ||
+                candidateFormat == reshade::api::format::b8g8r8a8_unorm ||
+                candidateFormat == reshade::api::format::b8g8r8x8_unorm;
+            if (candidateDesc.texture.width == expectedWidth &&
+                candidateDesc.texture.height == expectedHeight && supportedColorFormat) {
+                source = enhancedCleanCandidateResource;
+                sourceDesc = candidateDesc;
+                sourceState = enhancedCleanCandidateState == reshade::api::resource_usage::undefined
+                    ? reshade::api::resource_usage::render_target
+                    : enhancedCleanCandidateState;
+                usesCleanCandidate = true;
+            }
+        }
+    }
+
+    if ((usesCleanCandidate || usesPostEffectsCleanBackBuffer) &&
+        !hasLoggedEnhancedCleanCapture.exchange(true)) {
+        const std::string name = getD3D12ResourceDebugName(device, source);
+        LOG(LL_NFO, "Enhanced clean capture selected. source=",
+            usesPostEffectsCleanBackBuffer ? "post-ReShade-clean-backbuffer" : "pre-UI-render-target",
+            " handle=", Logger::hex(source.handle, 16),
+            " resolution=", sourceDesc.texture.width, "x", sourceDesc.texture.height,
+            " format=", static_cast<uint32_t>(sourceDesc.texture.format),
+            " state=", static_cast<uint32_t>(sourceState),
+            " name=", name.empty() ? "<unnamed>" : name);
+    }
+
+    if (sourceDesc.texture.width != expectedWidth || sourceDesc.texture.height != expectedHeight) {
+        if (!hasLoggedEnhancedCaptureResolutionMismatch.exchange(true)) {
+            LOG(LL_WRN, "Enhanced capture source resolution does not match the EVER output. source=",
+                sourceDesc.texture.width, "x", sourceDesc.texture.height,
+                " export=", expectedWidth, "x", expectedHeight,
+                ". Refusing to scale because EVER must preserve the configured high-resolution export.");
+        }
+        return;
+    }
+
+    const size_t rowPitch = static_cast<size_t>(expectedWidth) * 4;
+    if (rowPitch == 0 || rowPitch > std::numeric_limits<uint32_t>::max()) {
+        LOG(LL_ERR, "Enhanced ReShade capture produced invalid dimensions: ", expectedWidth, "x", expectedHeight);
+        return;
+    }
+
+    reshade::api::resource depthSource{};
+    reshade::api::resource_usage depthState = reshade::api::resource_usage::undefined;
+    reshade::api::resource_desc depthDesc{};
+    const reshade::api::resource_desc* depthDescPtr = nullptr;
+    if (Config::Manager::export_openexr) {
+        std::lock_guard<std::mutex> resourceLock(enhancedResourceMutex);
+        if (enhancedDepthCandidateDevice == device && enhancedDepthCandidateResource.handle != 0) {
+            depthSource = enhancedDepthCandidateResource;
+            depthState = enhancedDepthCandidateState == reshade::api::resource_usage::undefined
+                ? reshade::api::resource_usage::depth_stencil_write
+                : enhancedDepthCandidateState;
+            depthDesc = device->get_resource_desc(depthSource);
+            depthDescPtr = &depthDesc;
+        }
+    }
+
+    std::lock_guard<std::mutex> readbackLock(enhancedReadbackMutex);
+    if (!ensureEnhancedReadbackResourcesLocked(runtime, sourceDesc, depthDescPtr)) return;
+    const bool gpuMotionBlur = isCustomFrameRateSupported &&
+        Config::Manager::motion_blur_samples != 0 &&
+        !Config::Manager::export_openexr &&
+        ensureEnhancedGpuMotionBlurResourcesLocked(runtime, sourceDesc);
+
+    const uint64_t activeGeneration = enhancedCaptureGeneration.load(std::memory_order_acquire);
+    uint64_t completedGeneration = 0;
+    bool gpuMotionBlurOutput = false;
+    if (consumeEnhancedReadbackLocked(
+            reshadeCapturePixels, enhancedCaptureDepth, completedGeneration,
+            gpuMotionBlurOutput) &&
+        completedGeneration == activeGeneration &&
+        enhancedPendingVideoFrames.load(std::memory_order_acquire) != 0) {
+        const HRESULT result = gpuMotionBlurOutput
+            ? processEnhancedGpuMotionBlurOutput(
+                reshadeCapturePixels.data(), static_cast<uint32_t>(rowPitch), expectedHeight)
+            : processEnhancedCapturedVideoSample(
+                reshadeCapturePixels.data(), static_cast<uint32_t>(rowPitch), expectedHeight,
+                enhancedCaptureDepth.empty() ? nullptr : enhancedCaptureDepth.data(),
+                enhancedCaptureDepth.empty() ? 0u :
+                    expectedWidth * static_cast<uint32_t>(sizeof(float)));
+        if (FAILED(result)) {
+            LOG(LL_ERR, "Failed to enqueue Enhanced frame. hr=",
+                Logger::hex(static_cast<uint32_t>(result), 8));
+            return;
+        }
+        if (!hasLoggedEnhancedCaptureSuccess.exchange(true)) {
+            LOG(LL_NFO, "Enhanced frame capture active via asynchronous ReShade D3D12 readback. source=",
+                usesPostEffectsCleanBackBuffer ? "post-ReShade-clean-backbuffer" :
+                    (usesCleanCandidate ? "clean-pre-UI-render-target" : "swap-chain"),
+                " api=", static_cast<uint32_t>(device->get_api()),
+                " resolution=", expectedWidth, "x", expectedHeight,
+                " gpuMotionBlur=", gpuMotionBlurOutput);
+        }
+    }
+
+    const uint32_t pendingFrames = enhancedPendingVideoFrames.load(std::memory_order_acquire);
+    if (pendingFrames > enhancedReadbackOrder.size()) {
+        if (gpuMotionBlur) {
+            processEnhancedGpuMotionBlurSubframeLocked(
+                runtime, source, sourceState, activeGeneration);
+        } else {
+            queueEnhancedReadbackLocked(
+                runtime, source, sourceState, depthSource, depthState, activeGeneration);
         }
     }
 }
@@ -1570,10 +3552,135 @@ void ever::initialize() {
     PRE();
 
     try {
-        mainThreadId = std::this_thread::get_id();
-
         LOG(LL_NFO, "Initializing Media Foundation hook");
         PERFORM_NAMED_IMPORT_HOOK_REQUIRED("mfreadwrite.dll", MFCreateSinkWriterFromURL);
+
+        if (g_isEnhancedEdition) {
+            LOG(LL_NFO, "Detected GTA V Enhanced");
+            LOG(LL_NFO, "Enhanced compatibility mode enabled: Media Foundation audio/encoding hooks and ",
+                "ReShade cross-API frame capture are active");
+            LOG(LL_NFO, "Scanning the isolated Enhanced render-time wrapper for custom FPS support");
+
+            patternScanner.reset(new ever::hooking::PatternScanner());
+            patternScanner->initialize();
+            uint64_t pEnhancedGetRenderTimeBase = 0;
+            uint64_t pEnhancedStartBakeProject = 0;
+            uint64_t pEnhancedCleanupReplayPlayback = 0;
+            uint64_t pEnhancedIsPendingBakeStart = 0;
+            uint64_t pEnhancedKillPlaybackOrBake = 0;
+            patternScanner->addPattern(
+                "enhanced_get_render_time_base_function",
+                ever::hooking::patterns::getRenderTimeBaseEnhanced,
+                &pEnhancedGetRenderTimeBase);
+            patternScanner->addPattern(
+                "enhanced_start_bake_project",
+                ever::hooking::patterns::startBakeProjectEnhanced,
+                &pEnhancedStartBakeProject);
+            patternScanner->addPattern(
+                "enhanced_cleanup_replay_playback",
+                ever::hooking::patterns::cleanupReplayPlaybackEnhanced,
+                &pEnhancedCleanupReplayPlayback);
+            patternScanner->addPattern(
+                "enhanced_is_pending_bake_start",
+                ever::hooking::patterns::isPendingBakeStartEnhanced,
+                &pEnhancedIsPendingBakeStart);
+            patternScanner->addPattern(
+                "enhanced_kill_playback_or_bake",
+                ever::hooking::patterns::killPlaybackOrBakeEnhanced,
+                &pEnhancedKillPlaybackOrBake);
+            patternScanner->performScan();
+            logResolvedHookTarget("EnhancedGetRenderTimeBase", pEnhancedGetRenderTimeBase);
+            logResolvedHookTarget("EnhancedStartBakeProject", pEnhancedStartBakeProject);
+            logResolvedHookTarget("EnhancedCleanupReplayPlayback", pEnhancedCleanupReplayPlayback);
+            logResolvedHookTarget("EnhancedIsPendingBakeStart", pEnhancedIsPendingBakeStart);
+            logResolvedHookTarget("EnhancedKillPlaybackOrBake", pEnhancedKillPlaybackOrBake);
+
+            const bool expectedEnhancedEntry = pEnhancedGetRenderTimeBase != 0 && memoryStartsWith(
+                pEnhancedGetRenderTimeBase,
+                {0x48, 0x83, 0xEC, 0x28, 0x48, 0x8B, 0x01, 0xFF,
+                 0x50, 0x18, 0x89, 0xC1, 0x48, 0x83, 0xC4, 0x28});
+            if (expectedEnhancedEntry && installAbsoluteJumpHook(
+                    pEnhancedGetRenderTimeBase,
+                    reinterpret_cast<uintptr_t>(GameHooks::GetRenderTimeBase::Implementation))) {
+                isCustomFrameRateSupported = true;
+                LOG(LL_NFO, "Enhanced custom FPS hook installed successfully");
+            } else if (pEnhancedGetRenderTimeBase == 0) {
+                LOG(LL_WRN, "Enhanced custom FPS wrapper was not found; custom FPS remains disabled for this game build");
+            } else if (!expectedEnhancedEntry) {
+                LOG(LL_WRN, "Enhanced custom FPS candidate failed entry validation; hook was not installed");
+            } else {
+                LOG(LL_ERR, "Failed to install the validated Enhanced custom FPS hook");
+            }
+
+            bool enhancedDualPassHooksInstalled = false;
+            if (pEnhancedStartBakeProject && pEnhancedCleanupReplayPlayback &&
+                pEnhancedIsPendingBakeStart && pEnhancedKillPlaybackOrBake) {
+                try {
+                    PERFORM_X64_HOOK_WITH_SCHEME_REQUIRED(
+                        EnhancedStartBakeProject, pEnhancedStartBakeProject,
+                        PLH::x64Detour::detour_scheme_t::INPLACE);
+                    pCleanupReplayPlaybackOriginal = reinterpret_cast<CleanupReplayPlaybackInternalFunc>(
+                        pEnhancedCleanupReplayPlayback);
+                    std::memcpy(g_cleanupOriginalBytes,
+                                reinterpret_cast<const void*>(pEnhancedCleanupReplayPlayback),
+                                sizeof(g_cleanupOriginalBytes));
+                    if (!installAbsoluteJumpHook(
+                            pEnhancedCleanupReplayPlayback,
+                            reinterpret_cast<uintptr_t>(
+                                GameHooks::EnhancedCleanupReplayPlayback::Implementation))) {
+                        throw std::runtime_error("Failed to hook EnhancedCleanupReplayPlayback manually");
+                    }
+                    LOG(LL_NFO, "Enhanced CleanupReplayPlayback manual hook installed. target=",
+                        reinterpret_cast<void*>(pEnhancedCleanupReplayPlayback));
+                    pEnhancedKillPlaybackOrBakeOriginal =
+                        reinterpret_cast<EnhancedKillPlaybackOrBakeFunc>(
+                            pEnhancedKillPlaybackOrBake);
+                    std::memcpy(g_enhancedKillPlaybackOrBakeOriginalBytes,
+                                reinterpret_cast<const void*>(pEnhancedKillPlaybackOrBake),
+                                sizeof(g_enhancedKillPlaybackOrBakeOriginalBytes));
+                    if (!prepareEnhancedKillPass1ExitPatch(pEnhancedKillPlaybackOrBake)) {
+                        throw std::runtime_error(
+                            "Failed to resolve EnhancedKillPlaybackOrBake pass-one exit boundary");
+                    }
+                    if (!installAbsoluteJumpHook(
+                            pEnhancedKillPlaybackOrBake,
+                            reinterpret_cast<uintptr_t>(
+                                GameHooks::EnhancedKillPlaybackOrBake::Implementation))) {
+                        throw std::runtime_error("Failed to hook EnhancedKillPlaybackOrBake manually");
+                    }
+                    LOG(LL_NFO, "Enhanced KillPlaybackOrBake manual hook installed. target=",
+                        reinterpret_cast<void*>(pEnhancedKillPlaybackOrBake));
+                    g_isPendingBakeStartAddress = pEnhancedIsPendingBakeStart;
+                    g_isPendingBakeStartStatePtr =
+                        resolveIsPendingBakeStartStatePointer(pEnhancedIsPendingBakeStart);
+                    if (!g_isPendingBakeStartStatePtr || !installAbsoluteJumpHook(
+                            pEnhancedIsPendingBakeStart,
+                            reinterpret_cast<uintptr_t>(&IsPendingBakeStart_Hook))) {
+                        throw std::runtime_error("Failed to hook Enhanced IsPendingBakeStart");
+                    }
+                    LOG(LL_NFO, "Enhanced IsPendingBakeStart manual hook installed. state=",
+                        reinterpret_cast<void*>(g_isPendingBakeStartStatePtr));
+                    enhancedDualPassHooksInstalled = true;
+                    isEnhancedDualPassSupported = true;
+                    LOG(LL_NFO, "Enhanced dual-pass state-machine hooks installed successfully");
+                } catch (const std::exception& ex) {
+                    LOG(LL_ERR, "Enhanced dual-pass hook installation failed: ", ex.what());
+                } catch (...) {
+                    LOG(LL_ERR, "Enhanced dual-pass hook installation failed with an unknown exception");
+                }
+            } else {
+                LOG(LL_WRN, "One or more Enhanced dual-pass state-machine entry points were not found");
+            }
+
+            LOG(LL_NFO, "Skipping Legacy-only LoadLibrary and diagnostic IAT hooks in Enhanced");
+            LOG(enhancedDualPassHooksInstalled ? LL_NFO : LL_WRN,
+                "Enhanced dual-pass audio workflow is ",
+                enhancedDualPassHooksInstalled ? "available for runtime testing" : "unavailable for this game build");
+            LOG(LL_NFO, "Enhanced feature path active: clean pre-UI capture, custom FPS, multi-sample motion blur, ",
+                "dual-pass audio, and OpenEXR/depth export are available");
+            POST();
+            return;
+        }
         LOG(LL_NFO, "Initializing LoadLibrary hook");
         PERFORM_NAMED_IMPORT_HOOK_REQUIRED("kernel32.dll", LoadLibraryA);
         PERFORM_NAMED_IMPORT_HOOK_REQUIRED("kernel32.dll", LoadLibraryW);
@@ -1599,6 +3706,7 @@ void ever::initialize() {
         } else {
             LOG(LL_NFO, "MessageBoxW IAT hook installed - GTA V fatal error dialogs will be captured");
         }
+
 
         patternScanner.reset(new ever::hooking::PatternScanner());
         patternScanner->initialize();
@@ -1915,9 +4023,11 @@ void ever::initialize() {
 
 void ever::ScriptMain() {
     PRE();
+    mainThreadId = std::this_thread::get_id();
+    LOG(LL_NFO, "ScriptHook main thread registered for export handoffs");
     LOG(LL_NFO, "Starting main loop");
     while (true) {
-        if (!isD3D11HookInstalled) {
+        if (!g_isEnhancedEdition && !isD3D11HookInstalled) {
             ensureD3D11Hook();
         }
 
@@ -1970,7 +4080,7 @@ HMODULE ImportHooks::LoadLibraryW::Implementation(LPCWSTR lp_lib_file_name) {
 
     if (result != nullptr) {
         try {
-            if (std::wstring(L"d3d11.dll") == libFileName) {
+            if (!g_isEnhancedEdition && std::wstring(L"d3d11.dll") == libFileName) {
                 if (!installD3D11Hook(result)) {
                     LOG(LL_WRN, "Failed to install D3D11 hook from LoadLibraryW path");
                 }
@@ -1992,7 +4102,7 @@ HMODULE ImportHooks::LoadLibraryA::Implementation(LPCSTR lp_lib_file_name) {
             std::string libFileName(lp_lib_file_name);
             std::ranges::transform(libFileName, libFileName.begin(), [](const char c) { return std::tolower(c); });
 
-            if (std::string("d3d11.dll") == libFileName) {
+            if (!g_isEnhancedEdition && std::string("d3d11.dll") == libFileName) {
                 if (!installD3D11Hook(result)) {
                     LOG(LL_WRN, "Failed to install D3D11 hook from LoadLibraryA path");
                 }
@@ -2191,6 +4301,13 @@ HRESULT ImportHooks::MFCreateSinkWriterFromURL::Implementation(LPCWSTR pwszOutpu
     const HRESULT result = OriginalFunc(pwszOutputURL, pByteStream, pAttributes, ppSinkWriter);
     if (SUCCEEDED(result)) {
         try {
+            if (g_isEnhancedEdition) {
+                std::lock_guard<std::mutex> sessionLock(mxSession);
+                AutoReloadConfig();
+                CreateNewExportContext();
+                LOG(LL_NFO, "Enhanced export context created from MFCreateSinkWriterFromURL");
+            }
+
             PERFORM_MEMBER_HOOK_REQUIRED(IMFSinkWriter, AddStream, *ppSinkWriter);
             PERFORM_MEMBER_HOOK_REQUIRED(IMFSinkWriter, SetInputMediaType, *ppSinkWriter);
             PERFORM_MEMBER_HOOK_REQUIRED(IMFSinkWriter, WriteSample, *ppSinkWriter);
@@ -2207,8 +4324,24 @@ HRESULT IMFSinkWriterHooks::AddStream::Implementation(IMFSinkWriter* pThis, IMFM
                                                       DWORD* pdwStreamIndex) {
     PRE();
     LOG(LL_NFO, "IMFSinkWriter::AddStream: ", GetMediaTypeDescription(pTargetMediaType).c_str());
+    const HRESULT result = OriginalFunc(pThis, pTargetMediaType, pdwStreamIndex);
+
+    if (SUCCEEDED(result) && pdwStreamIndex != nullptr) {
+        std::lock_guard<std::mutex> sessionLock(mxSession);
+        if (::exportContext != nullptr) {
+            GUID majorType{};
+            if (SUCCEEDED(pTargetMediaType->GetMajorType(&majorType))) {
+                if (IsEqualGUID(majorType, MFMediaType_Video)) {
+                    ::exportContext->video_stream_index = *pdwStreamIndex;
+                } else if (IsEqualGUID(majorType, MFMediaType_Audio)) {
+                    ::exportContext->audio_stream_index = *pdwStreamIndex;
+                }
+            }
+        }
+    }
+
     POST();
-    return OriginalFunc(pThis, pTargetMediaType, pdwStreamIndex);
+    return result;
 }
 
 void CreateMotionBlurBuffers(ComPtr<ID3D11Device> p_device, D3D11_TEXTURE2D_DESC const& desc) {
@@ -2292,10 +4425,30 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
     PRE();
     LOG(LL_NFO, "IMFSinkWriter::SetInputMediaType: ", GetMediaTypeDescription(pInputMediaType).c_str());
 
+    if (::exportContext == nullptr || encodingSession == nullptr) {
+        LOG(LL_ERR, "SetInputMediaType called without an active EVER export context");
+        POST();
+        return OriginalFunc(pThis, dwStreamIndex, pInputMediaType, pEncodingParameters);
+    }
+
     GUID majorType;
     if (SUCCEEDED(pInputMediaType->GetMajorType(&majorType))) {
         if (IsEqualGUID(majorType, MFMediaType_Video)) {
             ::exportContext->video_media_type = pInputMediaType;
+            if (g_isEnhancedEdition) {
+                UINT32 width = 0;
+                UINT32 height = 0;
+                if (SUCCEEDED(MFGetAttributeSize(pInputMediaType, MF_MT_FRAME_SIZE, &width, &height))) {
+                    const uint32_t runtimeWidth = enhancedRuntimeWidth.load(std::memory_order_relaxed);
+                    const uint32_t runtimeHeight = enhancedRuntimeHeight.load(std::memory_order_relaxed);
+                    const uint32_t exportWidth = runtimeWidth != 0 ? runtimeWidth : width;
+                    const uint32_t exportHeight = runtimeHeight != 0 ? runtimeHeight : height;
+                    enhancedExpectedWidth = exportWidth;
+                    enhancedExpectedHeight = exportHeight;
+                    LOG(LL_DBG, "Enhanced export resource probe armed for ", exportWidth, "x", exportHeight,
+                        " (Rockstar stream ", width, "x", height, ")");
+                }
+            }
         } else if (IsEqualGUID(majorType, MFMediaType_Audio)) {
             try {
                 std::lock_guard<std::mutex> sessionLock(mxSession);
@@ -2317,6 +4470,14 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                          static_cast<float>(fps.second));
                     
                     LOG(LL_DBG, "Effective frame rate: ", gameFrameRate, " FPS");
+                    if (g_isEnhancedEdition && gameFrameRate > 60.0f) {
+                        LOG(isEnhancedDualPassSupported ? LL_NFO : LL_WRN,
+                            "Enhanced export is configured above the Legacy single-pass audio limit. effectiveFps=",
+                            gameFrameRate, " dualPassAvailable=", isEnhancedDualPassSupported,
+                            isEnhancedDualPassSupported
+                                ? "; audio-only/video-only workflow active"
+                                : "; audio support is not validated for this configuration");
+                    }
                     
                     if (dualPassContext) {
                         LOG(LL_DBG, "Dual-pass state: ", static_cast<int>(dualPassContext->state));
@@ -2372,7 +4533,7 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                     LOG(LL_DBG, "SetInputMediaType: dualPassContext state = ", static_cast<int>(dualPassContext->state));
                     if (dualPassContext->state == DualPassState::PASS1_RUNNING) {
                         // Pass 1: audio only (in-memory capture)
-                        std::string extension = "." + std::string(Config::Manager::encoder_config.format.container);
+                        std::string extension = outputExtensionForContainer(Config::Manager::encoder_config.format.container);
                         dualPassContext->final_output_file = output_file + extension;
                         LOG(LL_NFO, "Pass 1 audio output: IN-MEMORY BUFFER");
                         LOG(LL_NFO, "Pass 1 final output will be: ", dualPassContext->final_output_file);
@@ -2394,12 +4555,12 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                         LOG(LL_NFO, "  Buffered audio size: ", dualPassContext->audio_buffer.size(), " bytes");
                     } else {
                         LOG(LL_DBG, "SetInputMediaType: State not PASS1 or PASS2, using default filename");
-                        std::string extension = "." + std::string(Config::Manager::encoder_config.format.container);
+                        std::string extension = outputExtensionForContainer(Config::Manager::encoder_config.format.container);
                         filename = output_file + extension;
                     }
                 } else {
                     LOG(LL_DBG, "SetInputMediaType: No dualPassContext, using default filename");
-                    std::string extension = "." + std::string(Config::Manager::encoder_config.format.container);
+                    std::string extension = outputExtensionForContainer(Config::Manager::encoder_config.format.container);
                     filename = output_file + extension;
                 }
 
@@ -2418,51 +4579,87 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
                          dualPassContext->state == DualPassState::PASS2_RUNNING)) {
                         LOG(LL_NFO, "Pass 2: Creating FFmpeg encoder for video + buffered audio replay");
                     }
-                    DXGI_SWAP_CHAIN_DESC desc{};
-                    if (bindExportSwapChainIfAvailable()) {
-                        ::exportContext->p_swap_chain->GetDesc(&desc);
-                    } else if (::exportContext->p_export_render_target) {
-                        D3D11_TEXTURE2D_DESC targetDesc;
-                        ::exportContext->p_export_render_target->GetDesc(&targetDesc);
-                        desc.BufferDesc.Width = targetDesc.Width;
-                        desc.BufferDesc.Height = targetDesc.Height;
-                        LOG(LL_WRN, "Swap chain not available during SetInputMediaType; using export texture dimensions");
+                    if (g_isEnhancedEdition) {
+                        const uint32_t exportWidth = enhancedRuntimeWidth.load(std::memory_order_relaxed);
+                        const uint32_t exportHeight = enhancedRuntimeHeight.load(std::memory_order_relaxed);
+                        if (exportWidth == 0 || exportHeight == 0) {
+                            throw std::runtime_error(
+                                "Enhanced ReShade runtime resolution is unavailable; refusing to silently use the Rockstar export limit");
+                        }
+
+                        enhancedExpectedWidth = exportWidth;
+                        enhancedExpectedHeight = exportHeight;
+                        LOG(LL_NFO, "Enhanced Video Export Resolution: ", exportWidth, "x", exportHeight,
+                            " (Rockstar Media Foundation stream: ", width, "x", height, ")");
+
+                        if (Config::Manager::export_openexr) {
+                            LOG(LL_NFO, "Enhanced experimental OpenEXR export enabled with synchronized ",
+                                "full-resolution D3D12 color/depth readback");
+                        }
+                        if (Config::Manager::motion_blur_samples != 0) {
+                            if (isCustomFrameRateSupported) {
+                                LOG(LL_NFO, "Enhanced multi-sample motion blur requested. samples=",
+                                    static_cast<uint32_t>(Config::Manager::motion_blur_samples),
+                                    " strength=", Config::Manager::motion_blur_strength);
+                            } else {
+                                LOG(LL_WRN, "Enhanced multi-sample motion blur requires the custom FPS hook; ",
+                                    "capturing one native Rockstar Editor frame per output frame");
+                            }
+                        }
+
+                        REQUIRE(encodingSession->createContext(
+                                    Config::Manager::encoder_config, std::wstring(filename.begin(), filename.end()),
+                                    exportWidth, exportHeight, "rgba", fps_num, fps_den, numChannels, sampleRate, "s16",
+                                    blockAlignment, Config::Manager::export_openexr,
+                                    exportWidth, exportHeight),
+                                "Failed to create Enhanced encoding context.");
                     } else {
-                        throw std::runtime_error("Export context missing swap chain and render target");
+                        DXGI_SWAP_CHAIN_DESC desc{};
+                        if (bindExportSwapChainIfAvailable()) {
+                            ::exportContext->p_swap_chain->GetDesc(&desc);
+                        } else if (::exportContext->p_export_render_target) {
+                            D3D11_TEXTURE2D_DESC targetDesc;
+                            ::exportContext->p_export_render_target->GetDesc(&targetDesc);
+                            desc.BufferDesc.Width = targetDesc.Width;
+                            desc.BufferDesc.Height = targetDesc.Height;
+                            LOG(LL_WRN, "Swap chain not available during SetInputMediaType; using export texture dimensions");
+                        } else {
+                            throw std::runtime_error("Export context missing swap chain and render target");
+                        }
+
+                        const auto exportWidth = desc.BufferDesc.Width;
+                        const auto exportHeight = desc.BufferDesc.Height;
+
+                        // Get pBackBufferResolved dimensions for OpenEXR export
+                        D3D11_TEXTURE2D_DESC backBufferCopyDesc;
+                        pGameBackBufferResolved->GetDesc(&backBufferCopyDesc);
+                        const auto openExrWidth = backBufferCopyDesc.Width;
+                        const auto openExrHeight = backBufferCopyDesc.Height;
+
+                        LOG(LL_DBG, "Video Export Resolution: ", exportWidth, "x", exportHeight);
+                        LOG(LL_DBG, "OpenEXR Export Resolution: ", openExrWidth, "x", openExrHeight);
+
+                        D3D11_TEXTURE2D_DESC motionBlurBufferDesc;
+                        motionBlurBufferDesc.Width = exportWidth;
+                        motionBlurBufferDesc.Height = exportHeight;
+                        motionBlurBufferDesc.MipLevels = 1;
+                        motionBlurBufferDesc.ArraySize = 1;
+                        motionBlurBufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                        motionBlurBufferDesc.SampleDesc.Count = 1;
+                        motionBlurBufferDesc.SampleDesc.Quality = 0;
+                        motionBlurBufferDesc.Usage = D3D11_USAGE_DEFAULT;
+                        motionBlurBufferDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                        motionBlurBufferDesc.CPUAccessFlags = 0;
+                        motionBlurBufferDesc.MiscFlags = 0;
+
+                        CreateMotionBlurBuffers(::exportContext->p_device, motionBlurBufferDesc);
+
+                        REQUIRE(encodingSession->createContext(
+                                    Config::Manager::encoder_config, std::wstring(filename.begin(), filename.end()),
+                                    exportWidth, exportHeight, "rgba", fps_num, fps_den, numChannels, sampleRate,
+                                    "s16", blockAlignment, Config::Manager::export_openexr, openExrWidth, openExrHeight),
+                                "Failed to create encoding context.");
                     }
-
-                    const auto exportWidth = desc.BufferDesc.Width;
-                    const auto exportHeight = desc.BufferDesc.Height;
-
-                    // Get pBackBufferResolved dimensions for OpenEXR export
-                    D3D11_TEXTURE2D_DESC backBufferCopyDesc;
-                    pGameBackBufferResolved->GetDesc(&backBufferCopyDesc);
-                    const auto openExrWidth = backBufferCopyDesc.Width;
-                    const auto openExrHeight = backBufferCopyDesc.Height;
-
-                    LOG(LL_DBG, "Video Export Resolution: ", exportWidth, "x", exportHeight);
-                    LOG(LL_DBG, "OpenEXR Export Resolution: ", openExrWidth, "x", openExrHeight);
-
-                    D3D11_TEXTURE2D_DESC motionBlurBufferDesc;
-                    motionBlurBufferDesc.Width = exportWidth;
-                    motionBlurBufferDesc.Height = exportHeight;
-                    motionBlurBufferDesc.MipLevels = 1;
-                    motionBlurBufferDesc.ArraySize = 1;
-                    motionBlurBufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                    motionBlurBufferDesc.SampleDesc.Count = 1;
-                    motionBlurBufferDesc.SampleDesc.Quality = 0;
-                    motionBlurBufferDesc.Usage = D3D11_USAGE_DEFAULT;
-                    motionBlurBufferDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-                    motionBlurBufferDesc.CPUAccessFlags = 0;
-                    motionBlurBufferDesc.MiscFlags = 0;
-
-                    CreateMotionBlurBuffers(::exportContext->p_device, motionBlurBufferDesc);
-
-                    REQUIRE(encodingSession->createContext(
-                                Config::Manager::encoder_config, std::wstring(filename.begin(), filename.end()), exportWidth,
-                                exportHeight, "rgba", fps_num, fps_den, numChannels, sampleRate, "s16", blockAlignment,
-                                Config::Manager::export_openexr, openExrWidth, openExrHeight),
-                            "Failed to create encoding context.");
                 }
             } catch (std::exception& ex) {
                 LOG(LL_ERR, ex.what());
@@ -2492,7 +4689,20 @@ HRESULT IMFSinkWriterHooks::SetInputMediaType::Implementation(IMFSinkWriter* pTh
 HRESULT IMFSinkWriterHooks::WriteSample::Implementation(IMFSinkWriter* pThis, DWORD dwStreamIndex, IMFSample* pSample) {
     std::lock_guard sessionLock(mxSession);
 
-    if ((encodingSession) && (dwStreamIndex == 1) && (!::exportContext->is_audio_export_disabled)) {
+    if (g_isEnhancedEdition && encodingSession && ::exportContext &&
+        dwStreamIndex == ::exportContext->video_stream_index) {
+        if (dualPassContext && dualPassContext->state == DualPassState::PASS1_RUNNING) {
+            LOG(LL_TRC, "Enhanced Pass 1 (audio-only): discarding Rockstar video sample");
+            return S_OK;
+        }
+        const uint32_t pending = enhancedPendingVideoFrames.fetch_add(1, std::memory_order_release) + 1;
+        LOG(LL_TRC, "Enhanced video sample queued for ReShade capture. pending=", pending);
+        return S_OK;
+    }
+
+    if (encodingSession && ::exportContext &&
+        dwStreamIndex == ::exportContext->audio_stream_index &&
+        !::exportContext->is_audio_export_disabled) {
 
         ComPtr<IMFMediaBuffer> pBuffer = nullptr;
         try {
@@ -2626,6 +4836,7 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
                 
                 LOG_CALL(LL_DBG, encodingSession.reset());
                 LOG_CALL(LL_DBG, ::exportContext.reset());
+                resetEnhancedCaptureTracking();
 
                 if (dualPassContext && dualPassContext->state == DualPassState::PASS1_COMPLETE) {
                     LOG(LL_NFO, "Pass 1 finalize: waiting for cleanup hook/ScriptMain to complete handoff to Pass 2");
@@ -2688,80 +4899,8 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
 
                 std::unique_ptr<Encoder::EncoderSession> sessionForAsyncFinalize;
                 sessionForAsyncFinalize = std::move(encodingSession);
-
-                if (sessionForAsyncFinalize) {
-                    asyncFinalizeInProgress = true;
-                    asyncFinalizeCompleted = false;
-                    asyncFinalizeFailed = false;
-
-                    try {
-                        std::thread([session = std::move(sessionForAsyncFinalize)]() mutable {
-                            bool workerSuccess = true;
-                            try {
-                                LOG(LL_NFO, "Async FFmpeg finalization thread started");
-
-                                const HRESULT finishAudioHr = session->finishAudio();
-                                if (FAILED(finishAudioHr)) {
-                                    workerSuccess = false;
-                                    markFfmpegExportFailure("FinalizeAsync::finishAudio", finishAudioHr);
-                                }
-
-                                const HRESULT finishVideoHr = session->finishVideo();
-                                if (FAILED(finishVideoHr)) {
-                                    workerSuccess = false;
-                                    markFfmpegExportFailure("FinalizeAsync::finishVideo", finishVideoHr);
-                                }
-
-                                const HRESULT endSessionHr = session->endSession();
-                                if (FAILED(endSessionHr)) {
-                                    workerSuccess = false;
-                                    markFfmpegExportFailure("FinalizeAsync::endSession", endSessionHr);
-                                }
-                            } catch (const std::exception& ex) {
-                                workerSuccess = false;
-                                LOG(LL_ERR, "Async FFmpeg finalization exception: ", ex.what());
-                                markFfmpegExportFailure("FinalizeAsync::exception", E_FAIL);
-                            } catch (...) {
-                                workerSuccess = false;
-                                LOG(LL_ERR, "Async FFmpeg finalization unknown exception");
-                                markFfmpegExportFailure("FinalizeAsync::unknown", E_FAIL);
-                            }
-
-                            session.reset();
-
-                            asyncFinalizeFailed = !workerSuccess;
-                            asyncFinalizeCompleted = true;
-                            asyncFinalizeInProgress = false;
-
-                            if (workerSuccess) {
-                                clearFfmpegExportFailure();
-                                LOG(LL_NFO, "Async FFmpeg finalization completed successfully");
-                            } else {
-                                LOG(LL_ERR, "Async FFmpeg finalization failed. stage=", getFfmpegExportFailureStage());
-                            }
-                        }).detach();
-                    } catch (const std::exception& ex) {
-                        ffmpegFinalizeSuccess = false;
-                        markFfmpegExportFailure("FinalizeAsync::thread-start", E_FAIL);
-                        LOG(LL_ERR, "Failed to start async FFmpeg finalization thread: ", ex.what());
-                        asyncFinalizeFailed = true;
-                        asyncFinalizeCompleted = true;
-                        asyncFinalizeInProgress = false;
-                    } catch (...) {
-                        ffmpegFinalizeSuccess = false;
-                        markFfmpegExportFailure("FinalizeAsync::thread-start-unknown", E_FAIL);
-                        LOG(LL_ERR, "Failed to start async FFmpeg finalization thread (unknown exception)");
-                        asyncFinalizeFailed = true;
-                        asyncFinalizeCompleted = true;
-                        asyncFinalizeInProgress = false;
-                    }
-                } else {
-                    LOG(LL_WRN, "Pass 2 finalize: no encoding session available for async finalization");
-                    asyncFinalizeFailed = true;
-                    asyncFinalizeCompleted = true;
-                    asyncFinalizeInProgress = false;
+                if (!startAsyncEncoderFinalization(std::move(sessionForAsyncFinalize), "FinalizeAsync::pass2")) {
                     ffmpegFinalizeSuccess = false;
-                    markFfmpegExportFailure("FinalizeAsync::missing-session", E_FAIL);
                 }
                 
                 // Mark as complete BEFORE calling original Finalize
@@ -2784,6 +4923,7 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
                 // Clean up our resources
                 LOG(LL_DBG, "Cleaning up EVER resources...");
                 LOG_CALL(LL_DBG, ::exportContext.reset());
+                resetEnhancedCaptureTracking();
                 LOG(LL_DBG, "EVER resources cleaned up");
 
                 LOG(LL_DBG, "Executing OriginalFunc(pThis) for PASS2 cleanup...");
@@ -2809,22 +4949,43 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
                 } else {
                     LOG(LL_NFO, "Finalizing encoder (normal single-pass mode)");
                 }
-                
-                const HRESULT finishAudioHr = encodingSession->finishAudio();
-                const HRESULT finishVideoHr = encodingSession->finishVideo();
-                const HRESULT endSessionHr = encodingSession->endSession();
 
-                if (FAILED(finishAudioHr)) {
-                    ffmpegFinalizeSuccess = false;
-                    markFfmpegExportFailure("Finalize::normal::finishAudio", finishAudioHr);
+                if (g_isEnhancedEdition) {
+                    const HRESULT drainVideoHr = drainEnhancedReadbacksForFinalize();
+                    if (FAILED(drainVideoHr)) {
+                        ffmpegFinalizeSuccess = false;
+                        markFfmpegExportFailure("Finalize::normal::drainEnhancedReadbacks", drainVideoHr);
+                    }
                 }
-                if (FAILED(finishVideoHr)) {
-                    ffmpegFinalizeSuccess = false;
-                    markFfmpegExportFailure("Finalize::normal::finishVideo", finishVideoHr);
-                }
-                if (FAILED(endSessionHr)) {
-                    ffmpegFinalizeSuccess = false;
-                    markFfmpegExportFailure("Finalize::normal::endSession", endSessionHr);
+
+                if (g_isEnhancedEdition) {
+                    // GTA Enhanced can access stale bake state if its Media Foundation Finalize
+                    // callback is blocked for a long software-encoder/OpenEXR drain. Let Rockstar's
+                    // own Finalize return promptly and keep its loading gate active through the
+                    // existing async-finalization status hooks until the trailer is durable.
+                    std::unique_ptr<Encoder::EncoderSession> sessionForAsyncFinalize =
+                        std::move(encodingSession);
+                    if (!startAsyncEncoderFinalization(
+                            std::move(sessionForAsyncFinalize), "FinalizeAsync::single-pass")) {
+                        ffmpegFinalizeSuccess = false;
+                    }
+                } else {
+                    const HRESULT finishAudioHr = encodingSession->finishAudio();
+                    const HRESULT finishVideoHr = encodingSession->finishVideo();
+                    const HRESULT endSessionHr = encodingSession->endSession();
+
+                    if (FAILED(finishAudioHr)) {
+                        ffmpegFinalizeSuccess = false;
+                        markFfmpegExportFailure("Finalize::normal::finishAudio", finishAudioHr);
+                    }
+                    if (FAILED(finishVideoHr)) {
+                        ffmpegFinalizeSuccess = false;
+                        markFfmpegExportFailure("Finalize::normal::finishVideo", finishVideoHr);
+                    }
+                    if (FAILED(endSessionHr)) {
+                        ffmpegFinalizeSuccess = false;
+                        markFfmpegExportFailure("Finalize::normal::endSession", endSessionHr);
+                    }
                 }
             }
         }
@@ -2846,6 +5007,7 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
 
     LOG_CALL(LL_DBG, encodingSession.reset());
     LOG_CALL(LL_DBG, ::exportContext.reset());
+    resetEnhancedCaptureTracking();
     
     LOG(LL_NFO, "=== IMFSinkWriter::Finalize exit ===");
     POST();
@@ -2870,6 +5032,11 @@ HRESULT IMFSinkWriterHooks::Finalize::Implementation(IMFSinkWriter* pThis) {
 
 void ever::finalize() {
     PRE();
+    {
+        std::lock_guard<std::mutex> captureLock(reshadeCaptureMutex);
+        reshadeCapturePixels.clear();
+        reshadeCapturePixels.shrink_to_fit();
+    }
     POST();
 }
 
@@ -3026,6 +5193,175 @@ bool GameHooks::StartBakeProject::Implementation(void* videoEditorInterface, voi
     LOG(LL_DBG, "StartBakeProject original returned:", result);
     POST();
     return result;
+}
+
+bool GameHooks::EnhancedStartBakeProject::Implementation(void* montage, const char* exportName) {
+    PRE();
+
+    LOG(LL_NFO, "EnhancedStartBakeProject called");
+    LOG(LL_DBG, "  montage:", montage,
+        " exportName:", exportName ? SafeAnsiString(exportName) : "<default>");
+
+    if (dualPassContext &&
+        (dualPassContext->state == DualPassState::PASS2_PENDING ||
+         dualPassContext->state == DualPassState::PASS2_RUNNING)) {
+        LOG(LL_NFO, "Internal Enhanced Pass 2 start detected; preserving dual-pass state");
+    } else {
+        const float gameFrameRate =
+            (static_cast<float>(Config::Manager::fps.first) *
+             (static_cast<float>(Config::Manager::motion_blur_samples) + 1.0f) /
+             static_cast<float>(Config::Manager::fps.second));
+
+        LOG(LL_NFO, "Enhanced user export - effective frame rate: ", gameFrameRate, " FPS");
+
+        if (gameFrameRate > 60.0f && !isEnhancedDualPassSupported) {
+            LOG(LL_ERR, "Enhanced high-rate export refused because the dual-pass state machine is unavailable; ",
+                "EVER will not silently export without its required synchronized-audio workflow");
+            POST();
+            return false;
+        }
+
+        if (gameFrameRate > 60.0f) {
+            LOG(LL_NFO, "Enhanced high-rate export - activating DUAL-PASS audio workflow");
+
+            if (!dualPassContext) {
+                dualPassContext.reset(new DualPassContext());
+            }
+
+            dualPassContext->state = DualPassState::PASS1_RUNNING;
+            dualPassContext->original_fps = Config::Manager::fps;
+            dualPassContext->original_motion_blur_samples = Config::Manager::motion_blur_samples;
+            // Enhanced's first argument is the montage container. Keep it in the
+            // historically named field so the shared pass-two scheduler can own it.
+            dualPassContext->saved_video_editor_interface = montage;
+            dualPassContext->saved_montage_ptr = nullptr;
+            dualPassContext->enhanced_export_name_present = exportName != nullptr;
+            dualPassContext->enhanced_export_name = exportName ? SafeAnsiString(exportName) : std::string();
+            dualPassContext->audio_buffer.clear();
+            dualPassContext->audio_buffer_playback_position = 0;
+
+            g_pass2TriggerIssued = false;
+            g_pass2StartupPending = false;
+            g_pass2StartupDelayFrames = 0;
+
+            LOG(LL_NFO, "  PASS 1: audio only at 30 FPS, 0 motion-blur samples");
+            LOG(LL_NFO, "  PASS 2: video at ", Config::Manager::fps.first, "/",
+                Config::Manager::fps.second, " FPS, ",
+                Config::Manager::motion_blur_samples, " motion-blur samples");
+        } else {
+            LOG(LL_DBG, "Enhanced single-pass export selected");
+            if (dualPassContext && dualPassContext->state != DualPassState::IDLE) {
+                LOG(LL_WRN, "Resetting stale Enhanced dual-pass context before single-pass export");
+                dualPassContext->state = DualPassState::IDLE;
+                dualPassContext->audio_buffer.clear();
+                dualPassContext->enhanced_export_name.clear();
+                dualPassContext->enhanced_export_name_present = false;
+                g_pass2TriggerIssued = false;
+                g_pass2StartupPending = false;
+                g_pass2StartupDelayFrames = 0;
+            }
+        }
+    }
+
+    const bool result = OriginalFunc(montage, exportName);
+    LOG(LL_NFO, "EnhancedStartBakeProject original returned: ", result);
+    POST();
+    return result;
+}
+
+void GameHooks::EnhancedCleanupReplayPlayback::Implementation() {
+    PRE();
+    const bool pass1Handoff = dualPassContext &&
+        dualPassContext->state == DualPassState::PASS1_COMPLETE;
+
+    LOG(LL_NFO, "EnhancedCleanupReplayPlayback called. dualPass=",
+        dualPassContext ? dualPassStateName(dualPassContext->state) : "NO_CONTEXT");
+
+    if (pass1Handoff) {
+        g_enhancedDualPassCleanupInProgress = true;
+        const bool cleanupSucceeded = callEnhancedCleanupReplayPlaybackOriginal();
+        g_enhancedDualPassCleanupInProgress = false;
+
+        if (!cleanupSucceeded) {
+            LOG(LL_ERR, "Enhanced Pass 1 cleanup failed; Pass 2 cannot be started safely");
+            POST();
+            return;
+        }
+
+        if (!g_pass2TriggerIssued.exchange(true)) {
+            schedulePass2StartupOnMainThread("EnhancedCleanupReplayPlayback(pass1-complete)");
+            LOG(LL_NFO, "Enhanced Pass 1 cleanup complete; Pass 2 scheduled on the main thread");
+        } else {
+            LOG(LL_DBG, "Enhanced Pass 2 trigger was already issued");
+        }
+        POST();
+        return;
+    }
+
+    if (!callEnhancedCleanupReplayPlaybackOriginal()) {
+        LOG(LL_ERR, "Enhanced normal cleanup failed");
+        POST();
+        return;
+    }
+
+    if (dualPassContext && dualPassContext->state == DualPassState::PASS2_COMPLETE) {
+        LOG(LL_NFO, "Enhanced Pass 2 cleanup complete; resetting dual-pass context to IDLE");
+        dualPassContext->state = DualPassState::IDLE;
+        dualPassContext->enhanced_export_name.clear();
+        dualPassContext->enhanced_export_name_present = false;
+        g_pass2TriggerIssued = false;
+        g_pass2StartupPending = false;
+        g_pass2StartupDelayFrames = 0;
+    }
+
+    POST();
+}
+
+void GameHooks::EnhancedKillPlaybackOrBake::Implementation(bool userCancelled) {
+    PRE();
+
+    LOG(LL_NFO, "EnhancedKillPlaybackOrBake called. userCancelled=", userCancelled,
+        " dualPass=", dualPassContext ? dualPassStateName(dualPassContext->state) : "NO_CONTEXT",
+        " cleanupInProgress=", g_enhancedDualPassCleanupInProgress);
+
+    if (dualPassContext &&
+        (dualPassContext->state == DualPassState::PASS1_RUNNING ||
+         dualPassContext->state == DualPassState::PASS2_RUNNING) &&
+        !userCancelled && !g_enhancedDualPassCleanupInProgress) {
+        if (!callEnhancedKillPlaybackOrBakeThroughFinalize()) {
+            LOG(LL_ERR, "Enhanced partial KillPlaybackOrBake execution failed; preserving ",
+                dualPassStateName(dualPassContext->state), " state");
+        }
+        POST();
+        return;
+    }
+
+    if (dualPassContext && dualPassContext->state == DualPassState::PASS1_COMPLETE &&
+        !userCancelled && !g_enhancedDualPassCleanupInProgress) {
+        LOG(LL_NFO, "Suppressing duplicate Enhanced KillPlaybackOrBake while Pass 1 awaits cleanup");
+        POST();
+        return;
+    }
+
+    if (!callEnhancedKillPlaybackOrBakeOriginal(userCancelled)) {
+        LOG(LL_ERR, "Enhanced KillPlaybackOrBake original call failed");
+        POST();
+        return;
+    }
+
+    if (userCancelled && !g_enhancedDualPassCleanupInProgress && dualPassContext &&
+        dualPassContext->state != DualPassState::PASS2_COMPLETE) {
+        LOG(LL_NFO, "Enhanced dual-pass export cancelled; resetting buffered audio state");
+        dualPassContext->state = DualPassState::IDLE;
+        dualPassContext->audio_buffer.clear();
+        dualPassContext->enhanced_export_name.clear();
+        dualPassContext->enhanced_export_name_present = false;
+        g_pass2TriggerIssued = false;
+        g_pass2StartupPending = false;
+        g_pass2StartupDelayFrames = 0;
+    }
+
+    POST();
 }
 
 bool GameHooks::HasVideoRenderErrored::Implementation() {
@@ -3187,8 +5523,15 @@ float GameHooks::GetRenderTimeBase::Implementation(int64_t choice) {
     const std::pair<int32_t, int32_t> fps = Config::Manager::fps;
     const float result = 1000.0f * static_cast<float>(fps.second) /
                          (static_cast<float>(fps.first) * (static_cast<float>(Config::Manager::motion_blur_samples) + 1));
-    // float result = 1000.0f / 60.0f;
-    LOG(LL_NFO, "Time step: ", result);
+    const uint64_t logKey =
+        (static_cast<uint64_t>(static_cast<uint32_t>(fps.first)) << 32) ^
+        static_cast<uint32_t>(fps.second) ^
+        (static_cast<uint64_t>(Config::Manager::motion_blur_samples) << 24);
+    static std::atomic_uint64_t lastLoggedKey = std::numeric_limits<uint64_t>::max();
+    if (lastLoggedKey.exchange(logKey, std::memory_order_relaxed) != logKey) {
+        LOG(LL_NFO, "Export render time step: ", result, " ms (fps=", fps.first, "/", fps.second,
+            " motionBlurSamples=", static_cast<uint32_t>(Config::Manager::motion_blur_samples), ")");
+    }
     POST();
     return result;
 }
@@ -3204,6 +5547,10 @@ void CreateNewExportContext() {
     NOT_NULL(encodingSession, "Could not create the encoding session");
     ::exportContext.reset(new ExportContext());
     NOT_NULL(::exportContext, "Could not create export context");
+    hasLoggedEnhancedCaptureResolutionMismatch = false;
+    hasLoggedEnhancedCaptureSuccess = false;
+    hasLoggedEnhancedNamedCaptureFailure = false;
+    resetEnhancedCaptureTracking();
     clearFfmpegExportFailure();
     clearAsyncFinalizeState();
     

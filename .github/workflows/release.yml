@@ -52,12 +52,14 @@ jobs:
           $tag      = "${{ github.ref_name }}"
           $staging  = "staging"
           $outDir   = "x64\Release"
+          $licenses = "$staging\THIRD_PARTY_LICENSES"
 
           # Create clean staging area
           New-Item -ItemType Directory -Path $staging | Out-Null
+          New-Item -ItemType Directory -Path $licenses | Out-Null
 
-          # Copy EVER.asi
-          Copy-Item "$outDir\EVER.asi" "$staging\EVER.asi"
+          # The z-prefix guarantees that ReShade loads before the EVER add-on.
+          Copy-Item "$outDir\zEVER.asi" "$staging\zEVER.asi"
 
           # Copy EVER folder recursively
           Copy-Item "$outDir\EVER" "$staging\EVER" -Recurse
@@ -65,15 +67,33 @@ jobs:
           # Remove debug symbols and map files that should not ship
           Get-ChildItem -Path $staging -Recurse -Include "*.pdb", "*.map" | Remove-Item -Force
 
+          # Ship project documentation and the notices required by the bundled
+          # dependencies. ScriptHookV is a user-installed prerequisite and is
+          # intentionally not included.
+          Copy-Item "LICENSE", "NOTICE", "README.md", "ENHANCED_PORT.md" $staging
+          Copy-Item "docs" "$staging\docs" -Recurse
+
+          Get-ChildItem "vcpkg_installed\x64-windows-release\share" -Directory | ForEach-Object {
+            $copyright = Join-Path $_.FullName "copyright"
+            if (Test-Path $copyright) {
+              Copy-Item $copyright (Join-Path $licenses "$($_.Name).txt")
+            }
+          }
+
           # Create the release zip
-          $zipName = "EVER-$tag.zip"
+          $zipName = "EVER-Enhanced-$tag.zip"
           Compress-Archive -Path "$staging\*" -DestinationPath $zipName -Force
+          (Get-FileHash $zipName -Algorithm SHA256).Hash.ToLowerInvariant() + "  " + $zipName |
+            Set-Content "$zipName.sha256" -Encoding ascii
           Write-Host "Created $zipName"
 
       - name: Create GitHub release and upload zip
         uses: softprops/action-gh-release@v2
         with:
-          name: "EVER ${{ github.ref_name }}"
+          name: "EVER Enhanced ${{ github.ref_name }}"
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
-          files: "EVER-${{ github.ref_name }}.zip"
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            EVER-Enhanced-${{ github.ref_name }}.zip
+            EVER-Enhanced-${{ github.ref_name }}.zip.sha256

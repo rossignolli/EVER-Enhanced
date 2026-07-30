@@ -12,6 +12,48 @@
 #pragma warning(pop)
 
 namespace Encoder {
+    void EncoderSession::exrEncodingWorkerLoop() {
+        PRE();
+        LOG(LL_NFO, "EncoderSession OpenEXR worker started");
+
+        while (true) {
+            QueuedExrFrame frame;
+            {
+                std::unique_lock<std::mutex> lock(exrQueueMutex_);
+                exrQueueNotEmptyCv_.wait(lock, [this] {
+                    return exrQueueStopRequested_ || !exrQueue_.empty();
+                });
+
+                if (exrQueue_.empty()) {
+                    if (exrQueueStopRequested_) break;
+                    continue;
+                }
+
+                frame = std::move(exrQueue_.front());
+                exrQueue_.pop_front();
+                exrQueueNotFullCv_.notify_one();
+            }
+
+            const float* depth = frame.depth.empty()
+                ? nullptr
+                : reinterpret_cast<const float*>(frame.depth.data());
+            const HRESULT hr = exrExporter_.exportFrame(
+                frame.color.empty() ? nullptr : frame.color.data(), frame.colorRowPitch,
+                depth, frame.depthRowPitch, frame.frameIndex);
+            if (FAILED(hr)) {
+                LOG(LL_ERR, "OpenEXR worker failed to encode frame index=", frame.frameIndex,
+                    " hr=", Logger::hex(static_cast<uint32_t>(hr), 8));
+                std::lock_guard<std::mutex> lock(exrQueueMutex_);
+                exrWorkerFailed_ = true;
+            } else {
+                ++encodedExrFrames_;
+            }
+        }
+
+        LOG(LL_NFO, "EncoderSession OpenEXR worker stopped. encodedFrames=", encodedExrFrames_);
+        POST();
+    }
+
     void EncoderSession::videoEncodingWorkerLoop() {
         PRE();
         LOG(LL_NFO, "EncoderSession video worker started");
@@ -205,6 +247,21 @@ namespace Encoder {
             LOG(LL_DBG, "EncoderSession::createContext - OpenEXR export enabled");
             std::string exrOutputPath = utf8_encode(filename) + ".OpenEXR";
             exrExporter_.initialize(exrOutputPath, openExrWidth, openExrHeight);
+            {
+                std::lock_guard<std::mutex> lock(exrQueueMutex_);
+                exrQueue_.clear();
+                exrQueueStopRequested_ = false;
+                exrWorkerFailed_ = false;
+                queuedExrFrames_ = 0;
+                encodedExrFrames_ = 0;
+            }
+            try {
+                exrEncodingThread_ = std::thread(&EncoderSession::exrEncodingWorkerLoop, this);
+            } catch (const std::exception& ex) {
+                LOG(LL_ERR, "Failed to start OpenEXR worker thread: ", ex.what());
+                POST();
+                return E_FAIL;
+            }
         }
 
         LOG(LL_NFO, "EncoderSession::createContext - Opening FFmpeg encoder");
@@ -290,7 +347,61 @@ namespace Encoder {
         return S_OK;
     }
 
+    HRESULT EncoderSession::enqueueExrImage(const uint8_t* rgbaData, uint32_t colorRowPitch,
+                                             const float* depthData, uint32_t depthRowPitch) {
+        PRE();
+
+        if (isBeingDeleted_) {
+            POST();
+            return E_FAIL;
+        }
+        if (!exportExr_) {
+            POST();
+            return S_OK;
+        }
+
+        if (rgbaData == nullptr || colorRowPitch == 0 || height_ <= 0) {
+            LOG(LL_ERR, "Enhanced OpenEXR enqueue received invalid color data");
+            POST();
+            return E_INVALIDARG;
+        }
+
+        QueuedExrFrame frame;
+        frame.colorRowPitch = colorRowPitch;
+        frame.depthRowPitch = depthRowPitch;
+        frame.frameIndex = exrFrameNumber_++;
+        const size_t colorBytes = static_cast<size_t>(colorRowPitch) * static_cast<size_t>(height_);
+        frame.color.resize(colorBytes);
+        std::memcpy(frame.color.data(), rgbaData, colorBytes);
+        if (depthData != nullptr && depthRowPitch != 0) {
+            const size_t depthBytes = static_cast<size_t>(depthRowPitch) * static_cast<size_t>(height_);
+            frame.depth.resize(depthBytes);
+            std::memcpy(frame.depth.data(), depthData, depthBytes);
+        }
+
+        std::unique_lock<std::mutex> lock(exrQueueMutex_);
+        exrQueueNotFullCv_.wait(lock, [this] {
+            return exrQueueStopRequested_ || exrQueue_.size() < kMaxQueuedExrFrames;
+        });
+        if (exrQueueStopRequested_) {
+            LOG(LL_ERR, "OpenEXR queue stopped before frame could be submitted");
+            POST();
+            return E_FAIL;
+        }
+        exrQueue_.push_back(std::move(frame));
+        ++queuedExrFrames_;
+        lock.unlock();
+        exrQueueNotEmptyCv_.notify_one();
+
+        POST();
+        return S_OK;
+    }
+
     HRESULT EncoderSession::enqueueVideoFrame(const D3D11_MAPPED_SUBRESOURCE& subresource) {
+        return enqueueVideoFrame(subresource.pData, subresource.RowPitch, static_cast<uint32_t>(height_));
+    }
+
+    HRESULT EncoderSession::enqueueVideoFrame(const void* data, uint32_t rowPitch, uint32_t height) {
         PRE();
 
         if (isBeingDeleted_) {
@@ -298,20 +409,26 @@ namespace Encoder {
             return E_FAIL;
         }
 
-        if (subresource.pData == nullptr || subresource.RowPitch <= 0 || height_ <= 0) {
-            LOG(LL_ERR, "enqueueVideoFrame received invalid mapped resource");
+        if (data == nullptr || rowPitch == 0 || height == 0 || height_ <= 0) {
+            LOG(LL_ERR, "enqueueVideoFrame received invalid frame data");
             POST();
             return E_FAIL;
         }
 
+        if (height != static_cast<uint32_t>(height_)) {
+            LOG(LL_ERR, "enqueueVideoFrame height mismatch. expected=", height_, " received=", height);
+            POST();
+            return E_INVALIDARG;
+        }
+
         QueuedVideoFrame frame;
-        frame.rowPitch = static_cast<int>(subresource.RowPitch);
-        frame.height = height_;
+        frame.rowPitch = static_cast<int>(rowPitch);
+        frame.height = static_cast<int32_t>(height);
         frame.frameIndex = videoPts_++;
 
         const size_t frameBytes = static_cast<size_t>(frame.rowPitch) * static_cast<size_t>(frame.height);
         frame.data.resize(frameBytes);
-        std::memcpy(frame.data.data(), subresource.pData, frameBytes);
+        std::memcpy(frame.data.data(), data, frameBytes);
 
         std::unique_lock<std::mutex> lock(videoQueueMutex_);
         if (videoQueue_.size() >= kMaxQueuedVideoFrames) {
@@ -415,13 +532,13 @@ namespace Encoder {
             }
 
             if (exrEncodingThread_.joinable()) {
-                exrImageQueue_.enqueue(ExrQueueItem());
-                
-                std::unique_lock<std::mutex> lock(exrEncodingThreadMutex_);
-                while (!isExrEncodingThreadFinished_) {
-                    exrEncodingThreadFinishedCondition_.wait(lock);
+                {
+                    std::lock_guard<std::mutex> lock(exrQueueMutex_);
+                    exrQueueStopRequested_ = true;
                 }
-
+                exrQueueNotEmptyCv_.notify_all();
+                exrQueueNotFullCv_.notify_all();
+                LOG(LL_NFO, "Waiting for OpenEXR worker to drain queued frames...");
                 exrEncodingThread_.join();
             }
 
@@ -439,6 +556,11 @@ namespace Encoder {
 
             if (videoWorkerFailed_) {
                 LOG(LL_ERR, "finishVideo detected video worker encoding failure");
+                POST();
+                return E_FAIL;
+            }
+            if (exrWorkerFailed_) {
+                LOG(LL_ERR, "finishVideo detected OpenEXR worker encoding failure");
                 POST();
                 return E_FAIL;
             }

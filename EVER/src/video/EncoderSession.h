@@ -6,7 +6,9 @@
 #include "FFmpegEncoder.h"
 #include "FFmpegTypes.h"
 
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <Windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
@@ -49,9 +51,14 @@ namespace Encoder {
 
         HRESULT enqueueVideoFrame(const D3D11_MAPPED_SUBRESOURCE& subresource);
 
+        HRESULT enqueueVideoFrame(const void* data, uint32_t rowPitch, uint32_t height);
+
         HRESULT enqueueExrImage(const Microsoft::WRL::ComPtr<ID3D11DeviceContext>& deviceContext,
                             const Microsoft::WRL::ComPtr<ID3D11Texture2D>& colorTexture,
                             const Microsoft::WRL::ComPtr<ID3D11Texture2D>& depthTexture);
+
+        HRESULT enqueueExrImage(const uint8_t* rgbaData, uint32_t colorRowPitch,
+                            const float* depthData, uint32_t depthRowPitch);
 
         HRESULT writeVideoFrame(BYTE* data, int32_t length, int rowPitch, LONGLONG presentationTime);
 
@@ -63,6 +70,9 @@ namespace Encoder {
 
         HRESULT endSession();
 
+        uint32_t width() const { return static_cast<uint32_t>(width_); }
+        uint32_t height() const { return static_cast<uint32_t>(height_); }
+
         bool isCapturing = false;
 
     private:
@@ -73,8 +83,17 @@ namespace Encoder {
             int64_t frameIndex = 0;
         };
 
+        struct QueuedExrFrame {
+            std::vector<uint8_t> color;
+            std::vector<uint8_t> depth;
+            uint32_t colorRowPitch = 0;
+            uint32_t depthRowPitch = 0;
+            uint64_t frameIndex = 0;
+        };
+
         void videoEncodingWorkerLoop();
         HRESULT encodeQueuedVideoFrame(const QueuedVideoFrame& frame);
+        void exrEncodingWorkerLoop();
 
         std::unique_ptr<FFmpegEncoder> ffmpegEncoder_;
         FFmpeg::FFVIDEOFRAME videoFrame_;
@@ -118,10 +137,16 @@ namespace Encoder {
         bool exportExr_ = false;
         uint64_t exrFrameNumber_ = 0;
         OpenEXRExporter exrExporter_;
-        bool isExrEncodingThreadFinished_ = false;
-        std::condition_variable exrEncodingThreadFinishedCondition_;
-        std::mutex exrEncodingThreadMutex_;
+        std::mutex exrQueueMutex_;
+        std::condition_variable exrQueueNotEmptyCv_;
+        std::condition_variable exrQueueNotFullCv_;
+        std::deque<QueuedExrFrame> exrQueue_;
         std::thread exrEncodingThread_;
+        bool exrQueueStopRequested_ = false;
+        bool exrWorkerFailed_ = false;
+        uint64_t queuedExrFrames_ = 0;
+        uint64_t encodedExrFrames_ = 0;
+        static constexpr size_t kMaxQueuedExrFrames = 3;
 
         int32_t width_ = 0;
         int32_t height_ = 0;

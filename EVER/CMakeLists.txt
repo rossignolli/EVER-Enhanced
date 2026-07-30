@@ -157,6 +157,15 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
         TARGET_NAME_MINSIZEREL "EVER"
         TARGET_NAME_RELEASE "EVER"
         TARGET_NAME_RELWITHDEBINFO "EVER"
+        OUTPUT_NAME "zEVER"
+        OUTPUT_NAME_DEBUG "zEVER"
+        OUTPUT_NAME_MINSIZEREL "zEVER"
+        OUTPUT_NAME_RELEASE "zEVER"
+        OUTPUT_NAME_RELWITHDEBINFO "zEVER"
+        RUNTIME_OUTPUT_NAME_DEBUG "zEVER"
+        RUNTIME_OUTPUT_NAME_MINSIZEREL "zEVER"
+        RUNTIME_OUTPUT_NAME_RELEASE "zEVER"
+        RUNTIME_OUTPUT_NAME_RELWITHDEBINFO "zEVER"
         SUFFIX ".asi"
         )
 
@@ -164,17 +173,34 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 add_custom_target(shaders)
 
 set(HLSL_SHADER_FILES "shaders/PSAccumulate.hlsl" "shaders/PSDivide.hlsl" "shaders/VSFullScreen.hlsl")
+set(HLSL_ENHANCED_SHADER_FILES "shaders/PSAccumulateEnhanced.hlsl" "shaders/PSDivideEnhanced.hlsl" "shaders/VSFullScreenEnhanced.hlsl")
 
 set_source_files_properties("shaders/VSFullScreen.hlsl" PROPERTIES ShaderType "vs")
 set_source_files_properties("shaders/PSAccumulate.hlsl" PROPERTIES ShaderType "ps")
 set_source_files_properties("shaders/PSDivide.hlsl" PROPERTIES ShaderType "ps")
 set_source_files_properties(${HLSL_SHADER_FILES} PROPERTIES ShaderModel "4_0")
+set_source_files_properties("shaders/VSFullScreenEnhanced.hlsl" PROPERTIES ShaderType "vs")
+set_source_files_properties("shaders/PSAccumulateEnhanced.hlsl" PROPERTIES ShaderType "ps")
+set_source_files_properties("shaders/PSDivideEnhanced.hlsl" PROPERTIES ShaderType "ps")
+set_source_files_properties(${HLSL_ENHANCED_SHADER_FILES} PROPERTIES ShaderModel "5_1")
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/shaders")
 
 add_custom_command(TARGET shaders
                    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/shaders")
 
 foreach(FILE ${HLSL_SHADER_FILES})
+  get_filename_component(FILE_WE ${FILE} NAME_WE)
+  get_source_file_property(shadertype ${FILE} ShaderType)
+  get_source_file_property(shadermodel ${FILE} ShaderModel)
+  add_custom_command(TARGET shaders
+                     COMMAND fxc.exe /nologo /Emain /T${shadertype}_${shadermodel} $<IF:$<CONFIG:DEBUG>,/Od,/O1> /Zi /Fh ${CMAKE_BINARY_DIR}/shaders/${FILE_WE}.h /Fd ${CMAKE_BINARY_DIR}/shaders/${FILE_WE}.pdb ${FILE}
+                     MAIN_DEPENDENCY ${FILE}
+                     COMMENT "HLSL ${FILE}"
+                     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                     VERBATIM)
+endforeach(FILE)
+
+foreach(FILE ${HLSL_ENHANCED_SHADER_FILES})
   get_filename_component(FILE_WE ${FILE} NAME_WE)
   get_source_file_property(shadertype ${FILE} ShaderType)
   get_source_file_property(shadermodel ${FILE} ShaderModel)
@@ -241,7 +267,6 @@ target_link_options(${PROJECT_NAME} PRIVATE
         >
         $<$<CONFIG:Release>:
         /DELAYLOAD:OpenEXR-3_1.dll;
-        /MAPINFO:LINES;
         "/MAP:$<TARGET_FILE_DIR:${PROJECT_NAME}>/EVER_$<CONFIG>.map"
         >
         $<$<CONFIG:RelWithDebInfo>:
@@ -267,33 +292,21 @@ add_custom_command_if(
         PRE_BUILD
         COMMANDS
 )
-################################################################################
-# Post build events
-################################################################################
-add_custom_command_if(
-        TARGET ${PROJECT_NAME}
-        POST_BUILD
-        COMMANDS
-        COMMAND $<CONFIG:Debug> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:Debug> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:Debug> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:MinSizeRel> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER>"
-        COMMAND $<CONFIG:MinSizeRel> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:Release> del /F /Q "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER>"
-        COMMAND $<CONFIG:Release> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:Release> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:Release> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:RelWithDebInfo> xcopy /y /E "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/>deploy\\*" "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
-        COMMAND $<CONFIG:RelWithDebInfo> if not exist "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls" mkdir "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-        COMMAND $<CONFIG:RelWithDebInfo> move /Y "$<SHELL_PATH:${OUTPUT_DIRECTORY}>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/>EVER\\dlls"
-)
+file(GLOB EVER_VCPKG_RUNTIME_DLLS CONFIGURE_DEPENDS
+        "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin/*.dll")
 
 add_custom_command(
         TARGET ${PROJECT_NAME}
         POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "$<SHELL_PATH:${CMAKE_CURRENT_SOURCE_DIR}/deploy>"
+                "$<SHELL_PATH:${OUTPUT_DIRECTORY}>"
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>"
-        # Copy runtime DLLs from the active vcpkg triplet output (e.g. x64-windows-release).
-        COMMAND xcopy /y "$<SHELL_PATH:${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin>\\*.dll" "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>"
+        # Copy runtime DLLs from the active vcpkg triplet. cmake -E avoids
+        # xcopy's ambiguous file/directory handling while excluding PDBs.
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${EVER_VCPKG_RUNTIME_DLLS}
+                "$<SHELL_PATH:${OUTPUT_DIRECTORY}/EVER/dlls>"
         COMMENT "Copy FFmpeg and codec runtime DLLs"
 )
 
@@ -349,7 +362,7 @@ target_link_directories(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARY_DIRS})
 target_link_libraries(${PROJECT_NAME} PRIVATE ${FFMPEG_LIBRARIES})
 
 # D3D11
-target_link_libraries(${PROJECT_NAME} PRIVATE d3d11.lib)
+target_link_libraries(${PROJECT_NAME} PRIVATE d3d11.lib d3d12.lib dxguid.lib)
 
 # DbgHelp and Psapi for crash handling
 target_link_libraries(${PROJECT_NAME} PRIVATE dbghelp.lib psapi.lib)
@@ -359,3 +372,28 @@ target_link_libraries(${PROJECT_NAME} PRIVATE mfreadwrite.lib mfplat.lib mfuuid.
 
 # USER32
 target_link_libraries(${PROJECT_NAME} PRIVATE user32.lib)
+
+################################################################################
+# Tests
+################################################################################
+if(BUILD_TESTING)
+    add_executable(EVEROpenEXRRawTest
+        "tests/OpenEXRExporterRawTest.cpp"
+        "src/video/OpenEXRExporter.cpp"
+        "src/utils/logger.cpp"
+        "src/utils/util.cpp")
+    target_include_directories(EVEROpenEXRRawTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/video"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/utils")
+    target_compile_definitions(EVEROpenEXRRawTest PRIVATE
+        "TARGET_NAME=\"EVEROpenEXRRawTest\""
+        "EVER_BUILD_VERSION=\"v0.0.0-OPENEXR-TEST\""
+        "EVER_BUILD_DATE=\"test\""
+        "NOMINMAX"
+        "_CRT_SECURE_NO_WARNINGS")
+    target_link_libraries(EVEROpenEXRRawTest PRIVATE OpenEXR::OpenEXR d3d11.lib)
+    add_test(NAME EVEROpenEXRRawTest COMMAND EVEROpenEXRRawTest)
+    set_tests_properties(EVEROpenEXRRawTest PROPERTIES
+        ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin")
+endif()

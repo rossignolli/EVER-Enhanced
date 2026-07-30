@@ -27,7 +27,7 @@
     "format": "auto",
     "aspect": "auto",
     "scaling": "auto",
-    "codec_options": "global_quality=20:look_ahead=1"
+    "codec_options": "global_quality=20|look_ahead=1"
   },
   "audio": {
     "codec": "aac",
