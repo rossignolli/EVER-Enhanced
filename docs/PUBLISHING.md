@@ -35,3 +35,27 @@ State clearly:
 - that Legacy users should use upstream EVER releases.
 
 Do not promise compatibility with untested FiveM or future GTA updates.
+
+## Compatibility monitor
+
+`.github/workflows/compatibility-monitor.yml` checks Steam app `3240220` every
+six hours. It compares the public branch build ID with `compatibility.json`.
+
+When Steam changes the build ID, the workflow:
+
+- changes the README compatibility block to a prominent warning;
+- creates or updates an issue labeled `compatibility-warning`; and
+- changes the short GitHub repository description when the optional
+  `REPOSITORY_ADMIN_TOKEN` Actions secret is configured.
+
+The normal `GITHUB_TOKEN` can update repository contents and issues, but GitHub
+requires repository Administration permission to change the short description.
+Use a fine-grained token restricted to this repository with **Administration:
+read and write**, save it as `REPOSITORY_ADMIN_TOKEN`, and do not grant unrelated
+permissions.
+
+After a GTA update, do not clear the warning until the end-to-end export matrix
+passes. Then update all version fields in `compatibility.json`, update the
+validation record, and manually dispatch the workflow. A matching build restores
+the supported README block, closes the warning issue, and restores the normal
+short description.

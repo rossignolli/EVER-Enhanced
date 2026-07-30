@@ -3,6 +3,12 @@
 [![License](https://img.shields.io/badge/source-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/GTA%20V-Enhanced-success.svg)](ENHANCED_PORT.md)
 
+<!-- compatibility-status:start -->
+> [!IMPORTANT]
+> **Compatibility status:** validated for GTA V Enhanced `1.0.1158.13`
+> (Steam build `24129078`), tested on 2026-07-30.
+<!-- compatibility-status:end -->
+
 **EVER Enhanced (Extended Video Export Revived)** removes Rockstar Editor's
 normal export limitations on GTA V Enhanced. It captures the real game render
 target before Rockstar's export UI and encodes it with the resolution, frame
