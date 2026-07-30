@@ -70,7 +70,7 @@ jobs:
           # Ship project documentation and the notices required by the bundled
           # dependencies. ScriptHookV is a user-installed prerequisite and is
           # intentionally not included.
-          Copy-Item "LICENSE", "NOTICE", "README.md", "ENHANCED_PORT.md" $staging
+          Copy-Item "LICENSE", "NOTICE", "README.md", "README.pt-BR.md", "README.es.md", "ENHANCED_PORT.md" $staging
           Copy-Item "docs" "$staging\docs" -Recurse
 
           Get-ChildItem "vcpkg_installed\x64-windows-release\share" -Directory | ForEach-Object {

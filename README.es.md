@@ -28,6 +28,90 @@ El historial y los créditos del proyecto original se conservaron.
 > con GTA V Enhanced 1.0.1158.13 y ScriptHookV 3889.0. Una actualización del
 > juego puede cambiar funciones internas y requerir una actualización de EVER.
 
+## Descarga e instalación
+
+### Antes de empezar
+
+EVER Enhanced está destinado actualmente a la versión indicada en el aviso de
+compatibilidad anterior. No fuerces su carga tras una actualización de GTA si
+el aviso indica que la nueva compilación aún no ha sido validada.
+
+Necesitas:
+
+- una copia legal de **GTA V Enhanced para Windows** (no GTA V Legacy);
+- una versión de ScriptHookV que admita expresamente tu compilación de Enhanced;
+- ReShade instalado para DirectX 12 con **compatibilidad completa de
+  complementos**; y
+- suficiente espacio libre y memoria de GPU para la exportación elegida.
+
+ScriptHookV y ReShade son requisitos independientes y no se incluyen con EVER
+Enhanced.
+
+### 1. Descarga el archivo correcto
+
+Abre [la versión más reciente de EVER Enhanced](https://github.com/rossignolli/EVER-Enhanced/releases/latest),
+despliega **Assets** y descarga `EVER-Enhanced-<versión>.zip`. No descargues los
+archivos “Source code” generados automáticamente por GitHub: no contienen el
+mod compilado ni sus DLL de ejecución.
+
+El archivo `.zip.sha256` correspondiente es opcional, pero permite comprobar
+que el ZIP se descargó correctamente. Si Windows marca el archivo como
+bloqueado, abre sus Propiedades y elige **Desbloquear** antes de extraerlo.
+
+### 2. Instala los requisitos
+
+1. Instala un ScriptHookV compatible con GTA V Enhanced en la carpeta que
+   contiene `GTA5_Enhanced.exe`, siguiendo las instrucciones de su autor.
+2. Ejecuta el instalador de ReShade y selecciona `GTA5_Enhanced.exe`, no el
+   ejecutable de Legacy.
+3. Selecciona el renderizador **DirectX 12** y la versión de ReShade con
+   **compatibilidad completa de complementos**. Una versión restringida no
+   puede cargar la captura de EVER.
+
+### 3. Extrae EVER Enhanced
+
+Cierra primero el juego. Haz una copia de cualquier `zEVER.asi` y carpeta `EVER`
+existentes; después extrae el contenido del ZIP directamente en la carpeta que
+contiene `GTA5_Enhanced.exe`.
+
+La estructura final debe ser:
+
+```text
+GTA V Enhanced/
+|-- GTA5_Enhanced.exe
+|-- zEVER.asi
+`-- EVER/
+    |-- EVER.ini
+    |-- preset.json
+    |-- EncoderConfig.exe
+    |-- dlls/
+    `-- presets/
+```
+
+`zEVER.asi` debe quedar junto al ejecutable del juego, no dentro de la carpeta
+`EVER`. El prefijo `z` hace que ReShade se cargue antes de EVER; no cambies el
+nombre del archivo.
+
+### 4. Comprueba el primer inicio
+
+1. Inicia el **Modo Historia**.
+2. Pulsa `Home` para abrir ReShade y entra en la pestaña de complementos.
+3. Comprueba que EVER muestre `GTA V Enhanced` y `Enhanced compatibility mode`.
+4. Si EVER no aparece, no empieces a exportar. Revisa el ejecutable seleccionado
+   en ReShade, la compatibilidad completa de complementos, la versión de
+   ScriptHookV y la estructura de carpetas anterior.
+
+### 5. Haz una primera exportación segura
+
+Empieza con un proyecto corto del Editor Rockstar a 1920x1080, 30 FPS, H.264 y
+`motion_blur_samples = 0`. Cuando funcione, aumenta la resolución/FPS y añade
+desenfoque de movimiento un ajuste cada vez. Así es más fácil distinguir fallos
+del codificador, VRAM, captura o doble pasada.
+
+Consulta la [guía completa de instalación y uso](docs/INSTALL_ENHANCED.md) para
+ejemplos de configuración, ubicación de salida, solución de problemas y
+desinstalación.
+
 ## Pruebas de la versión actual
 
 Estas son imágenes reales extraídas de las pruebas completas con el Editor
@@ -82,34 +166,6 @@ versión probada y una futura versión que solo se supone compatible.
 
 La implementación y los resultados detallados están documentados en
 [ENHANCED_PORT.md](ENHANCED_PORT.md).
-
-## Requisitos
-
-- Una copia legal de GTA V Enhanced para Windows.
-- Una versión de ScriptHookV que admita expresamente la versión instalada.
-- ReShade instalado para `GTA5_Enhanced.exe`, con DirectX 12 y **compatibilidad
-  completa de complementos**.
-- Espacio libre suficiente para la resolución, FPS, códec y opciones EXR
-  elegidos. Las secuencias OpenEXR pueden ocupar mucho espacio.
-
-ScriptHookV y ReShade no se incluyen con EVER Enhanced.
-
-## Instalación
-
-1. Descarga el `EVER-Enhanced-*.zip` más reciente en Releases.
-2. Instala un ScriptHookV compatible con GTA V Enhanced en la carpeta del juego.
-3. Instala ReShade para `GTA5_Enhanced.exe`; elige DirectX 12 y la versión con
-   compatibilidad completa de complementos.
-4. Extrae el ZIP en la carpeta de GTA V Enhanced. `zEVER.asi` y la carpeta
-   `EVER` deben quedar junto al ejecutable del juego.
-5. Inicia el juego y abre ReShade con `Home`. En la pestaña de complementos,
-   comprueba que EVER muestre `GTA V Enhanced` y `Enhanced compatibility mode`.
-
-El prefijo `z` es intencional: hace que ReShade se cargue antes del complemento
-de EVER. No cambies el nombre de `zEVER.asi`.
-
-Consulta la [guía completa de instalación y uso](docs/INSTALL_ENHANCED.md) para
-configuración, pasos de exportación, ubicación de salida y solución de problemas.
 
 ## Uso rápido
 
