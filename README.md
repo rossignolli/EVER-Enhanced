@@ -27,6 +27,9 @@ The upstream history and attribution are intentionally preserved.
 > validated on GTA V Enhanced 1.0.1158.13 with ScriptHookV 3889.0. A game update
 > can change internal functions and require a compatible EVER update.
 
+Read the [complete v2.0.0-beta.2 release notes](docs/RELEASE_NOTES_v2.0.0-beta.2.md)
+for the port changes, validation matrix, installation, and known limitations.
+
 ## Download and install
 
 ### Before you begin
@@ -47,7 +50,7 @@ EVER Enhanced.
 
 ### 1. Download the correct archive
 
-Open [the latest EVER Enhanced release](https://github.com/rossignolli/EVER-Enhanced/releases/latest),
+Open [the EVER Enhanced releases page](https://github.com/rossignolli/EVER-Enhanced/releases),
 expand **Assets**, and download `EVER-Enhanced-<version>.zip`. Do not download
 GitHub's automatically generated “Source code” archives: they do not contain
 the compiled mod or its runtime DLLs.

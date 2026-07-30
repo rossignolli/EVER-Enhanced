@@ -28,6 +28,9 @@ O histórico e os créditos do projeto original foram preservados.
 > validada no GTA V Enhanced 1.0.1158.13 com ScriptHookV 3889.0. Uma atualização
 > do jogo pode alterar funções internas e exigir uma atualização do EVER.
 
+Leia as [notas completas da versão v2.0.0-beta.2](docs/RELEASE_NOTES_v2.0.0-beta.2.md)
+para conhecer as mudanças do port, testes, instalação e limitações.
+
 ## Download e instalação
 
 ### Antes de começar
@@ -48,7 +51,7 @@ EVER Enhanced.
 
 ### 1. Baixe o arquivo correto
 
-Abra [a versão mais recente do EVER Enhanced](https://github.com/rossignolli/EVER-Enhanced/releases/latest),
+Abra [a página de versões do EVER Enhanced](https://github.com/rossignolli/EVER-Enhanced/releases),
 expanda **Assets** e baixe `EVER-Enhanced-<versão>.zip`. Não baixe os arquivos
 “Source code” gerados automaticamente pelo GitHub: eles não contêm o mod
 compilado nem as DLLs necessárias.
