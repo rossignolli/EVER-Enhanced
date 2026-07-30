@@ -2,7 +2,8 @@ name: GTA V Enhanced compatibility monitor
 
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    # Mondays at 12:17 UTC (09:17 in Brasilia, UTC-3).
+    - cron: "17 12 * * 1"
   workflow_dispatch:
 
 permissions:

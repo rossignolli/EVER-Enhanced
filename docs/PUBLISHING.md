@@ -38,8 +38,10 @@ Do not promise compatibility with untested FiveM or future GTA updates.
 
 ## Compatibility monitor
 
-`.github/workflows/compatibility-monitor.yml` checks Steam app `3240220` every
-six hours. It compares the public branch build ID with `compatibility.json`.
+`.github/workflows/compatibility-monitor.yml` checks Steam app `3240220` once a
+week, on Mondays at 12:17 UTC (09:17 in Brasilia). It can also be dispatched
+manually after a known GTA update. The workflow compares the public branch build
+ID with `compatibility.json`.
 
 When Steam changes the build ID, the workflow:
 
