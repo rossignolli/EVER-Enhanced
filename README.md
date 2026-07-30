@@ -1,5 +1,9 @@
 # EVER Enhanced
 
+[![English](https://img.shields.io/badge/Language-English-0969da)](README.md)
+[![Português](https://img.shields.io/badge/Idioma-Português-1f883d)](README.pt-BR.md)
+[![Español](https://img.shields.io/badge/Idioma-Español-da3633)](README.es.md)
+
 [![License](https://img.shields.io/badge/source-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/GTA%20V-Enhanced-success.svg)](ENHANCED_PORT.md)
 

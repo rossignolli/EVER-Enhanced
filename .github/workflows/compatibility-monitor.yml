@@ -58,6 +58,8 @@ jobs:
             --steam-output "$RUNNER_TEMP/steam-app-info.txt" \
             --config compatibility.json \
             --readme README.md \
+            --readme README.pt-BR.md \
+            --readme README.es.md \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Commit a changed compatibility banner
@@ -67,7 +69,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md
+          git add README.md README.pt-BR.md README.es.md
           git commit -m "Update GTA V Enhanced compatibility warning"
           git push origin HEAD:main
 
