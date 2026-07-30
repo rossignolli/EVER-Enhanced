@@ -41,8 +41,10 @@ the new build has not been validated.
 You need:
 
 - a legally installed copy of **GTA V Enhanced for Windows** (not GTA V Legacy);
-- a ScriptHookV release that explicitly supports your installed Enhanced build;
-- ReShade installed for DirectX 12 with **full add-on support**; and
+- a [ScriptHookV](https://www.dev-c.com/gtav/scripthookv/) release that explicitly
+  supports your installed Enhanced build;
+- [ReShade](https://reshade.me/) installed for DirectX 12 with **full add-on
+  support**; and
 - enough free disk space and GPU memory for your chosen export settings.
 
 ScriptHookV and ReShade are separate prerequisites and are not bundled with
@@ -61,10 +63,11 @@ open its Properties dialog and choose **Unblock** before extracting it.
 
 ### 2. Install the prerequisites
 
-1. Install a GTA V Enhanced-compatible ScriptHookV in the directory containing
-   `GTA5_Enhanced.exe`, following its author's instructions.
-2. Run the ReShade installer and select `GTA5_Enhanced.exe` — not the Legacy
-   executable.
+1. Download and install [ScriptHookV from its official page](https://www.dev-c.com/gtav/scripthookv/)
+   in the directory containing `GTA5_Enhanced.exe`. Confirm that the listed
+   version supports your installed Enhanced build.
+2. Download [ReShade from its official website](https://reshade.me/), run its
+   installer, and select `GTA5_Enhanced.exe` — not the Legacy executable.
 3. Select the **DirectX 12** renderer and the ReShade build with **full add-on
    support**. A restricted ReShade build cannot load EVER's capture add-on.
 

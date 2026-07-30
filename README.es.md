@@ -42,9 +42,10 @@ el aviso indica que la nueva compilación aún no ha sido validada.
 Necesitas:
 
 - una copia legal de **GTA V Enhanced para Windows** (no GTA V Legacy);
-- una versión de ScriptHookV que admita expresamente tu compilación de Enhanced;
-- ReShade instalado para DirectX 12 con **compatibilidad completa de
-  complementos**; y
+- una versión de [ScriptHookV](https://www.dev-c.com/gtav/scripthookv/) que
+  admita expresamente tu compilación de Enhanced;
+- [ReShade](https://reshade.me/) instalado para DirectX 12 con **compatibilidad
+  completa de complementos**; y
 - suficiente espacio libre y memoria de GPU para la exportación elegida.
 
 ScriptHookV y ReShade son requisitos independientes y no se incluyen con EVER
@@ -63,10 +64,11 @@ bloqueado, abre sus Propiedades y elige **Desbloquear** antes de extraerlo.
 
 ### 2. Instala los requisitos
 
-1. Instala un ScriptHookV compatible con GTA V Enhanced en la carpeta que
-   contiene `GTA5_Enhanced.exe`, siguiendo las instrucciones de su autor.
-2. Ejecuta el instalador de ReShade y selecciona `GTA5_Enhanced.exe`, no el
-   ejecutable de Legacy.
+1. Descarga [ScriptHookV desde su página oficial](https://www.dev-c.com/gtav/scripthookv/)
+   e instálalo en la carpeta que contiene `GTA5_Enhanced.exe`. Comprueba que la
+   versión indicada sea compatible con tu compilación de Enhanced.
+2. Descarga [ReShade desde su sitio oficial](https://reshade.me/), ejecuta el
+   instalador y selecciona `GTA5_Enhanced.exe`, no el ejecutable de Legacy.
 3. Selecciona el renderizador **DirectX 12** y la versión de ReShade con
    **compatibilidad completa de complementos**. Una versión restringida no
    puede cargar la captura de EVER.

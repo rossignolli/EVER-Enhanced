@@ -9,17 +9,21 @@ notes list your GTA V Enhanced build before using it.
 You need:
 
 - GTA V Enhanced on Windows;
-- a ScriptHookV build that supports GTA V Enhanced;
-- ReShade for DirectX 12 with full add-on support; and
+- a [ScriptHookV build](https://www.dev-c.com/gtav/scripthookv/) that supports
+  GTA V Enhanced;
+- [ReShade](https://reshade.me/) for DirectX 12 with full add-on support; and
 - sufficient disk and GPU memory for the selected export.
 
 ## Installation
 
 1. Back up any existing `zEVER.asi` and `EVER` directory from the GTA V
    Enhanced installation folder.
-2. Install ScriptHookV according to its author's instructions.
-3. Run the ReShade installer, select `GTA5_Enhanced.exe`, select DirectX 12,
-   and install the version with full add-on support.
+2. Download [ScriptHookV from its official page](https://www.dev-c.com/gtav/scripthookv/)
+   and install it according to its author's instructions. Verify that the page
+   lists support for the installed Enhanced build.
+3. Download [ReShade from its official website](https://reshade.me/), run the
+   installer, select `GTA5_Enhanced.exe`, select DirectX 12, and install the
+   version with full add-on support.
 4. Extract the EVER Enhanced release ZIP directly into the directory containing
    `GTA5_Enhanced.exe`.
 
