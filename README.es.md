@@ -8,9 +8,11 @@
 [![Plataforma](https://img.shields.io/badge/GTA%20V-Enhanced-success.svg)](ENHANCED_PORT.md)
 
 <!-- compatibility-status:start -->
-> [!IMPORTANT]
-> **Estado de compatibilidad:** validado para GTA V Enhanced `1.0.1158.13`
-> (compilación de Steam `24129078`), probado el 2026-07-30.
+> [!CAUTION]
+> **Aviso de compatibilidad:** Steam distribuye ahora GTA V Enhanced compilación
+> `25261616`, pero EVER Enhanced solo se validó con el juego `1.0.1158.13` /
+> compilación de Steam `24129078` (2026-07-30). No supongas que los
+> hooks específicos de esta versión son seguros hasta que se retire este aviso.
 <!-- compatibility-status:end -->
 
 **EVER Enhanced (Extended Video Export Revived)** elimina las limitaciones
