@@ -10,7 +10,7 @@
 <!-- compatibility-status:start -->
 > [!CAUTION]
 > **Compatibility warning:** Steam now distributes GTA V Enhanced build
-> `25261616`, but EVER Enhanced has only been validated on game
+> `25971420`, but EVER Enhanced has only been validated on game
 > `1.0.1158.13` / Steam build `24129078` (2026-07-30). Do not
 > assume the version-specific hooks are safe until this notice is cleared.
 <!-- compatibility-status:end -->
